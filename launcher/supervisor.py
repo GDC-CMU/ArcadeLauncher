@@ -259,6 +259,11 @@ class Supervisor:
             retry would spin forever on a broken display.
         install_signal_handlers: Install SIGINT/SIGTERM handlers for the
             duration of :meth:`run`.
+        shutdown: The flag a termination request sets. Pass the same event to
+            the gallery (as its ``should_stop`` predicate) so a signal reaches
+            the running session; the supervisor alone only checks it between
+            sessions, which is not enough to interrupt one. Defaults to a
+            private event, which is what the tests that never signal use.
     """
 
     def __init__(
@@ -270,6 +275,7 @@ class Supervisor:
         initial_state: SessionState | None = None,
         max_ui_restarts: int = 2,
         install_signal_handlers: bool = True,
+        shutdown: threading.Event | None = None,
     ) -> None:
         self.manifest = manifest
         self.cache = cache
@@ -280,7 +286,7 @@ class Supervisor:
         self.state = initial_state or SessionState()
         self.max_ui_restarts = max_ui_restarts
         self._install_signal_handlers = install_signal_handlers
-        self._shutdown = threading.Event()
+        self._shutdown = shutdown if shutdown is not None else threading.Event()
         self._previous_handlers: dict[int, object] = {}
         #: Number of completed gallery sessions -- asserted by the tests.
         self.sessions_run = 0

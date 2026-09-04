@@ -221,9 +221,9 @@ gallery onto whatever panel is fitted without the layout changing.
 
 ### Cabinet-specific hazards
 
-Two failure modes exist only on the cabinet and never on a development machine,
-which is exactly what makes them dangerous. Both are handled, and both have
-tests that fail if the handling is removed.
+Four failure modes exist only on the cabinet and never on a development machine,
+which is exactly what makes them dangerous. All are handled, and each has tests
+that fail if the handling is removed.
 
 **The `cmu_graphics` Pygame shim.** The box has `cmu_graphics` installed — the
 ROM folder is named after it — and it ships a module that answers to the name
@@ -248,6 +248,26 @@ directory, in-process and in a fresh interpreter, and refuses to let
 Games are unaffected by that: a game is still started with **its own checkout**
 as the working directory, which is what puts its directory on the child's
 `sys.path[0]` so its sibling imports keep resolving.
+
+**Termination has to actually terminate.** The arcade menu stops the launcher by
+sending `SIGTERM`, and the cabinet's documented recovery for a process that will
+not quit is the physical reset button — which the box's maintainer warns risks
+filesystem corruption. The signal handler sets a shutdown flag, but a flag only
+read *between* gallery sessions is useless: an idle cabinet never leaves its
+session, so the launcher logged the signal and kept running. The gallery loop now
+polls that same flag every frame and leaves as though the visitor had pressed
+exit, so SDL is released, the sync worker is stopped and any running game is
+terminated rather than orphaned. Measured on Linux: **0.05 s** for `SIGTERM` and
+`SIGINT`, both exit code 0.
+
+**A joystick is announced twice.** SDL reports a device that is already plugged
+in through both the start-up `get_count()` enumeration *and* a `JOYDEVICEADDED`
+event, so the cabinet's two sticks produced four "joystick attached" lines. Each
+duplicate opened a second SDL handle and replaced the first without closing it.
+Devices are now keyed by SDL instance id and re-adding a known one is a no-op
+that closes the duplicate handle. Navigation was never affected — held
+directions are merged as a set, so a doubled device could not double-step the
+selection — and there is a test pinning that, so it stays true.
 
 ## Offline behaviour
 
@@ -442,6 +462,8 @@ standalone programs — `StreetFighter` runs from this gallery **unmodified**.
 | "manifest not found" on the cabinet only | Something resolved a repository file relative to the working directory, which the arcade menu does not guarantee | Already handled: every path derives from `launcher/paths.py`. If this reappears, `python -m unittest discover -s tests -v` will point at the offending file. |
 | `pygame.error: No available video device` | Headless shell | Same as above. |
 | Screenshot tests fail right after cloning | Your Pygame/SDL_ttf differs from the one that generated the committed PNGs | Not expected any more — that comparison now skips itself with an explanatory message. If a screenshot test *does* fail it means the UI really did change: run `python -m tools.generate_previews` and commit the result. |
+| Launcher will not close; the menu cannot stop it | A termination signal was caught but the running gallery never saw it | Fixed: the loop checks the shutdown flag every frame and exits in ~50 ms. Never use the reset button for this — the maintainer warns it risks filesystem corruption. |
+| Each joystick logged twice at start-up | SDL announces an already-connected device through both enumeration and `JOYDEVICEADDED` | Fixed: devices are keyed by SDL instance id, so the second announcement is ignored. Navigation was never double-stepping. |
 
 ## Club-fair preflight
 

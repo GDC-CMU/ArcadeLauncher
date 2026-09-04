@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import threading
 from pathlib import Path
 from typing import Callable
 
@@ -142,13 +143,17 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     try:
+        shutdown = threading.Event()
         with SyncService(cache, online=online) as sync:
-            session = gallery_session(manifest, settings, states, sync)
+            session = gallery_session(
+                manifest, settings, states, sync, should_stop=shutdown.is_set
+            )
             supervisor = Supervisor(
                 manifest,
                 cache,
                 session,
                 initial_state=SessionState(view_mode=settings.default_view),
+                shutdown=shutdown,
             )
             return supervisor.run()
     except LauncherError as exc:

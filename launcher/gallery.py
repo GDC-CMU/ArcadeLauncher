@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import warnings
+from collections.abc import Callable
 
 from .controls import Command, command_for_button
 from .input_state import Direction, NavigationController, RepeatPolicy
@@ -69,6 +70,11 @@ _VIEW_COMMANDS: dict[Command, ViewMode] = {
 _TOAST_MS = 1600
 
 
+def _never() -> bool:
+    """Default shutdown predicate: a session that is never asked to stop."""
+    return False
+
+
 class GallerySession:
     """Runs one gallery session and reports what the visitor asked for.
 
@@ -79,6 +85,12 @@ class GallerySession:
             :meth:`_absorb_sync` as background syncs finish.
         sync: Optional background sync service. ``None`` disables updates,
             which is what the offline tests use.
+        should_stop: Polled once per frame; when it returns ``True`` the
+            session ends as though the visitor had exited. This is how a
+            SIGTERM reaches the loop. Without it the supervisor's shutdown
+            flag is only read *between* sessions, so an idle cabinet -- which
+            never generates a QUIT of its own -- would run forever and have to
+            be reset at the wall. Defaults to "never stop".
     """
 
     def __init__(
@@ -87,6 +99,7 @@ class GallerySession:
         settings: Settings,
         states: dict[str, GameState],
         sync: SyncService | None = None,
+        should_stop: Callable[[], bool] | None = None,
     ) -> None:
         self.manifest = manifest
         self.settings = settings
@@ -101,6 +114,7 @@ class GallerySession:
             deadzone=settings.axis_deadzone,
         )
         self._joysticks: dict[int, pygame.joystick.Joystick] = {}
+        self._should_stop = should_stop if should_stop is not None else _never
 
     # ------------------------------------------------------------------
     # Entry point (the supervisor's UiFactory)
@@ -171,6 +185,17 @@ class GallerySession:
         _log.debug("SDL released")
 
     def _attach_joystick(self, index: int) -> None:
+        """Open and register the device at *index*, at most once.
+
+        SDL announces a device that is already plugged in twice at start-up:
+        once through the ``get_count()`` enumeration this class does on open,
+        and again as a ``JOYDEVICEADDED`` event in the first frames of the
+        loop. The device index has to be opened before its stable instance id
+        can be read, so the duplicate is detected here and its handle closed
+        rather than left to leak. Keying on the instance id -- not the device
+        index, which SDL reuses -- is what makes this idempotent however the
+        device is discovered.
+        """
         try:
             stick = pygame.joystick.Joystick(index)
             stick.init()
@@ -178,6 +203,17 @@ class GallerySession:
             _log.warning("joystick %s could not be opened: %s", index, exc)
             return
         instance_id = stick.get_instance_id()
+
+        known = self._joysticks.get(instance_id)
+        if known is not None:
+            if known is not stick:
+                try:
+                    stick.quit()
+                except pygame.error as exc:
+                    _log.debug("duplicate joystick handle %s: %s", instance_id, exc)
+            _log.debug("joystick instance %s already attached", instance_id)
+            return
+
         self._joysticks[instance_id] = stick
         self.navigation.axes.attach(instance_id)
         _log.info("joystick attached: %s (instance %s)", stick.get_name(), instance_id)
@@ -222,6 +258,13 @@ class GallerySession:
             self.sync.request_all(self.manifest.launchable)
 
         while True:
+            # Checked first, and every frame: a termination request must be
+            # observed while the session is running, not merely between
+            # sessions. On an idle cabinet there is no other way out.
+            if self._should_stop():
+                _log.info("shutdown requested; leaving the gallery")
+                return self._outcome(UiAction.QUIT, mode, index)
+
             delta_ms = self._tick(clock)
             elapsed_ms += delta_ms
             focus_ms += delta_ms

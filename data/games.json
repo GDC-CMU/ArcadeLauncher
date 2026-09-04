@@ -1,0 +1,87 @@
+{
+  "version": 1,
+  "_comment": "Curated GDC-CMU arcade gallery. See README.md -> 'Adding a game'. Only entries with launchable=true are ever cloned or executed; coming-soon entries deliberately carry no repository, ref or entrypoint.",
+  "games": [
+    {
+      "id": "streetfighter",
+      "title": "Street Fighter",
+      "description": "A vintage arcade-style fighting game featuring four unique professor characters, each with their own special abilities and fighting styles.",
+      "runtime": "python",
+      "launchable": true,
+      "repository": "https://github.com/GDC-CMU/StreetFighter.git",
+      "ref": "main",
+      "entrypoint": "main.py",
+      "note": "Press P1 in-game to return to this gallery.",
+      "art": {
+        "motif": "duel",
+        "palette": ["cmu_red", "warm_amber", "ink"],
+        "seed": 1101
+      }
+    },
+    {
+      "id": "pass-the-game",
+      "title": "Pass The Game",
+      "description": "Start with a simple game. Pass it on. Watch it evolve into something unpredictable. No rules, just creativity and surprises.",
+      "runtime": "python",
+      "launchable": false,
+      "note": "Being prepared for the arcade.",
+      "art": {
+        "motif": "relay",
+        "palette": ["violet", "electric_cyan", "ink"],
+        "seed": 2202
+      }
+    },
+    {
+      "id": "flappy-scotty",
+      "title": "Flappy Scotty",
+      "description": "Navigate through tricky obstacles, flap your way through dangerous hazards, and protect Scotty to reach the farthest point possible in the Flappy World.",
+      "runtime": "python",
+      "launchable": false,
+      "note": "Being prepared for the arcade.",
+      "art": {
+        "motif": "flight",
+        "palette": ["electric_cyan", "warm_amber", "ink"],
+        "seed": 3303
+      }
+    },
+    {
+      "id": "smart-ways-to-die",
+      "title": "Smart Ways To Die",
+      "description": "Try to die in the smartest way possible in the shortest amount of time.",
+      "runtime": "python",
+      "launchable": false,
+      "note": "Being prepared for the arcade.",
+      "art": {
+        "motif": "hazard",
+        "palette": ["warm_amber", "violet", "ink"],
+        "seed": 4404
+      }
+    },
+    {
+      "id": "spicy-adventures",
+      "title": "Spicy Adventures",
+      "description": "Go on an adventure with some extra spice.",
+      "runtime": "python",
+      "launchable": false,
+      "note": "Being prepared for the arcade.",
+      "art": {
+        "motif": "ember",
+        "palette": ["ember_red", "warm_amber", "ink"],
+        "seed": 5505
+      }
+    },
+    {
+      "id": "ufo-race-server",
+      "title": "UFO Race",
+      "description": "A two player game where you are an alien roaming in the space with your bestie.",
+      "runtime": "python",
+      "launchable": false,
+      "note": "Two-player build being prepared.",
+      "art": {
+        "motif": "orbit",
+        "palette": ["mint", "violet", "ink"],
+        "seed": 6606
+      }
+    }
+  ]
+}

@@ -1,0 +1,469 @@
+<p align="center">
+  <img src="assets/branding/gdc-cmu-logo.png" alt="Game Dev Club — Carnegie Mellon University in Qatar" width="140">
+</p>
+
+<h1 align="center">GDC Arcade Launcher</h1>
+
+<p align="center">
+  The front door to the Game Dev Club arcade cabinet at Carnegie Mellon University in Qatar.
+</p>
+
+---
+
+## What it is
+
+`ArcadeLauncher` is the gallery that greets whoever walks up to the CMU-Q arcade
+cabinet. It shows the club's games as a curated wall of cards, lets a visitor
+browse them with the joystick alone, and starts the one they pick.
+
+It is a **launcher**, not a game. It owns no gameplay. Its whole job is to look
+like it belongs on an arcade machine, keep the club's catalogue current, and get
+out of the way the moment somebody presses a button — then be there again when
+they come back.
+
+Three things make it more than a menu:
+
+- **A supervisor, not a wrapper.** The launcher completely releases the display,
+  the audio device and every joystick before a game starts, then runs the game as
+  a separate process. Games do not have to know the launcher exists, and a game
+  that crashes cannot take the cabinet down with it — the gallery simply comes
+  back with an explanation.
+- **Three real view modes.** Grid, Carousel and Cover Flow are three genuinely
+  different compositions of the same catalogue, not one layout with the spacing
+  changed. Press `Select` to cycle them live.
+- **It survives a dead network.** The cabinet's Wi-Fi at a club fair is a rumour,
+  not a fact. Games are cached on disk, updates happen in the background, and a
+  failed update never blocks play — it just labels the card honestly.
+
+## Architecture
+
+The codebase is layered, and the layering is enforced by a test
+(`tests/test_repo_hygiene.py::LayeringTests`).
+
+```
+main.py                    arcade entrypoint: parse args, wire everything, exit cleanly
+│
+├── launcher/              PURE LOGIC — none of these import pygame
+│   ├── paths.py           every filesystem location, resolved once
+│   ├── errors.py          the exception vocabulary
+│   ├── manifest.py        parse + validate data/games.json; path containment rules
+│   ├── settings.py        config/launcher.json + ARCADE_LAUNCHER_* env overrides
+│   ├── viewmodes.py       the ViewMode enum and its cycle order
+│   ├── status.py          GameState / GameStatus / Notice — what a card says
+│   ├── cache.py           the on-disk git checkout cache (clone, update, verify)
+│   ├── sync.py            background updates on a worker thread
+│   ├── controls.py        the arcade button map (b=0 … p1=5 … Start=9)
+│   ├── input_state.py     axis deadzone, debounce, auto-repeat
+│   └── supervisor.py      the outer loop: run UI → launch child → run UI → …
+│
+├── launcher/gallery.py    the Pygame session (the UI half of the supervisor loop)
+│
+├── launcher/ui/           RENDERING — the only place pygame is imported
+│   ├── theme.py           palette, fonts, spacing tokens
+│   ├── surfaces.py        an LRU cache so nothing is redrawn needlessly
+│   ├── art.py             procedural cover art, seeded per game
+│   ├── effects.py         glows, gradients, reflections
+│   ├── viewmodel.py       GalleryFrame — an immutable description of one frame
+│   ├── components.py      shared widgets: header, status strip, badges, legend
+│   ├── views/             grid.py · carousel.py · coverflow.py
+│   ├── scene.py           picks the view and renders it
+│   └── fatal.py           branded on-screen error, for failures before the gallery
+│
+└── tools/generate_previews.py   renders the screenshots in this README
+```
+
+### The supervisor loop and the two-level exit
+
+The single most important design decision is that the launcher and a game are
+**never alive at the same time**.
+
+```
+Supervisor.run()
+  ├─▶ GallerySession(state)          SDL up · browse · returns UiOutcome
+  │     └─ finally: release SDL      display, audio and joysticks handed back
+  ├─▶ ProcessGameRunner(...)         [sys.executable, "main.py"] with cwd=<checkout>
+  │     └─ waits for the child to exit; captures its output to a file
+  └─▶ back to GallerySession(state)  with a notice if the child crashed
+```
+
+`StreetFighter/pygame_compat.py` calls `pygame.init()` at import time. If the
+launcher still held the display, the child would open onto a surface it does not
+own. That is why `GallerySession.__call__` releases SDL in a `finally` block
+rather than at the end of the loop body — even a crash inside the gallery gives
+the hardware back.
+
+This produces the **two-level exit** a visitor experiences:
+
+| Where you are | Press `P1` | What happens |
+| --- | --- | --- |
+| Inside a game | `P1` | The game exits. You are back at the gallery. |
+| At the gallery | `P1` | The launcher exits `0`. You are back at the arcade menu. |
+
+Nobody has to learn two different buttons. The same button always means *"take
+me back one level."*
+
+## Controls
+
+Everything is reachable from the joystick and buttons. There is no mouse — the
+cursor is hidden at start-up, and no interaction requires one.
+
+### On the cabinet
+
+| Input | Button id | Action |
+| --- | --- | --- |
+| Joystick ← → | axis 0 | Previous / next game |
+| Joystick ↑ ↓ | axis 1 | Grid: previous / next row. Carousel and Cover Flow: previous / next game |
+| `A` | 1 | **Play** the selected game |
+| `Select` | 8 | Cycle view mode: Grid → Carousel → Cover Flow → Grid |
+| `P1` | 5 | **Exit** to the arcade menu |
+| `B` `X` `Y` `Start`, insert money | 0, 2, 3, 9, 4 | Unbound, deliberately. Three buttons is the whole vocabulary — a visitor should never have to guess. Insert money in particular does nothing: the arcade is free. |
+
+The stick is digital, so each axis is treated as a switch with a `0.5` deadzone.
+Holding a direction steps once, pauses `380 ms`, then repeats every `140 ms`; all
+three values live in `config/launcher.json`.
+
+Messages clear themselves: an error banner disappears on the next thing you do,
+and the "not ready yet" pop fades after about 1.5 seconds. There is nothing to
+dismiss and no dialog to get stuck in.
+
+### On a keyboard (development)
+
+| Key | Action |
+| --- | --- |
+| Arrow keys or `WASD` | Navigate |
+| `Enter` or `Space` | Play |
+| `Tab` | Next view mode |
+| `1` `2` `3` | Jump straight to Grid / Carousel / Cover Flow |
+| `Esc` | Exit |
+
+The on-screen legend is generated from the same binding table the input handler
+uses, so it cannot drift out of date.
+
+## Setup
+
+Requires **Python 3.10 or newer** and `git` on `PATH`. The cabinet runs Python
+3.10, so 3.10 is the floor this is tested against, not just the minimum in
+theory.
+
+```bash
+git clone https://github.com/GDC-CMU/ArcadeLauncher.git
+cd ArcadeLauncher
+python -m pip install -r requirements.txt
+python main.py
+```
+
+Useful flags while developing:
+
+```bash
+python main.py --no-sync      # never touch the network; use whatever is cached
+python main.py --verbose      # log every cache and subprocess decision
+python main.py --cache /tmp/x # put the game checkouts somewhere disposable
+python main.py --help         # the full list
+```
+
+Run the tests and regenerate the screenshots:
+
+```bash
+python -m unittest discover -s tests -v
+python -m tools.generate_previews
+```
+
+The test suite is fully offline and headless — it clones only local fixture
+repositories and forces the SDL dummy driver, so it is safe to run anywhere.
+
+## Deploying to the CMU-Q arcade
+
+The cabinet is a RetroPie Linux box (x86-64, Python 3.10). Games live in
+`/home/es/RetroPie/roms/cmu_graphics/<Name>.git`, and **the directory name is
+what appears on the outer menu** — so name it the way you want visitors to read
+it. The `.git` suffix is part of the convention on that box, alongside
+`Tarnival-StreetFighter.git` and `Professor-Invaders.git`. For each entry the
+menu pulls the repository, installs `requirements.txt` into a per-game
+virtualenv at `<game-dir>/retropie-venv`, then runs `main.py`.
+
+Installing is one clone. This repository is public, so a plain HTTPS clone is
+all it takes — no deploy key, no SSH host alias:
+
+```bash
+cd /home/es/RetroPie/roms/cmu_graphics
+git clone https://github.com/GDC-CMU/ArcadeLauncher.git "Arcade-Launcher.git"
+```
+
+Then restart the box and the new entry appears on the menu.
+
+> The deploy-key and SSH-host-alias procedure in the maintainer's instructions
+> is only needed for **private** repositories. This one is public.
+
+After that, a deploy is just a push to `main` — the cabinet pulls it on the next
+boot. What that means for this repository:
+
+1. **Merge to `main`.** The cabinet pulls this branch; there is no build step.
+2. **Keep `main.py` at the repository root.** The arcade menu invokes it by that
+   exact path. Do not rename or move it.
+3. **Do not assume a working directory.** It is not documented which directory
+   the menu runs `main.py` from, so nothing here resolves a file relative to it
+   — every path comes from the package's own location. See
+   [Cabinet-specific hazards](#cabinet-specific-hazards).
+4. **Keep `requirements.txt` installable.** The menu builds a virtualenv per
+   game from it. It pins `pygame-ce`, the maintained fork the cabinet already
+   uses.
+5. **Exit codes matter.** The launcher returns `0` on a normal exit — that is
+   what tells the arcade menu the session ended cleanly. It returns `1` only if
+   it could not start at all, and in that case it first paints a readable,
+   branded error screen so a club member standing at the cabinet can see what
+   went wrong instead of a black rectangle.
+6. **First boot needs the network.** The initial run clones each launchable game
+   — StreetFighter included — into `.arcade-cache/games/<id>`. Do this while the
+   box still has network. After that the cabinet can run indefinitely offline.
+
+The display is opened at **800×600** with `pygame.SCALED`, so SDL letterboxes the
+gallery onto whatever panel is fitted without the layout changing.
+
+### Cabinet-specific hazards
+
+Two failure modes exist only on the cabinet and never on a development machine,
+which is exactly what makes them dangerous. Both are handled, and both have
+tests that fail if the handling is removed.
+
+**The `cmu_graphics` Pygame shim.** The box has `cmu_graphics` installed — the
+ROM folder is named after it — and it ships a module that answers to the name
+`pygame` without being Pygame. If it wins the import, anything that did a plain
+`import pygame` dies before drawing a frame. So nothing here imports Pygame
+directly: [`launcher/ui/pygame_runtime.py`](launcher/ui/pygame_runtime.py)
+imports it, checks the result really does provide `init`, `display`, `Surface`,
+`event`, `font` and the rest, and if it finds a shim it drops **only** that
+one `sys.path` entry, clears the module cache and re-imports. If no real Pygame
+can be found it raises — it never calls `sys.exit()` — so `main.py` still paints
+the branded error screen and still owns the exit code.
+
+**The unknown working directory.** `data/games.json`, `config/launcher.json`,
+`assets/branding/gdc-cmu-logo.png` and `.arcade-cache/` are all resolved from
+`__file__` in [`launcher/paths.py`](launcher/paths.py), never from
+`os.getcwd()`. A single working-directory-relative path would work on every
+developer's machine and fail on the cabinet with "manifest not found".
+`tests/test_paths.py` proves it by loading everything from an unrelated
+directory, in-process and in a fresh interpreter, and refuses to let
+`Path.cwd()`, `os.getcwd()` or a relative path literal back into the package.
+
+Games are unaffected by that: a game is still started with **its own checkout**
+as the working directory, which is what puts its directory on the child's
+`sys.path[0]` so its sibling imports keep resolving.
+
+## Offline behaviour
+
+Game checkouts live in `.arcade-cache/` (git-ignored, never committed). On
+start-up a background thread refreshes each launchable game while the gallery is
+already interactive — updating never blocks browsing.
+
+Each card reports exactly what is true of it right now:
+
+| Badge | Meaning |
+| --- | --- |
+| `PLAYABLE` | Cached, verified and current. Press `A` to start it. |
+| `UPDATING` | A background fetch is running. Play is held for the second or two it takes, because git may be mid-write in that checkout. |
+| `CACHED OFFLINE` | The update failed, but a good checkout is already there. Fully playable. |
+| `UNAVAILABLE` | Never successfully downloaded on this cabinet. Not playable. |
+| `COMING SOON` | Curated in the manifest but not released yet. Not playable. |
+| `QUEUED` | Waiting its turn in the sync queue. |
+
+Colour, label *and* — for the busy states — a pulsing dot all encode the same
+thing, so the distinction survives a photo, a dim projector or a colour-blind
+visitor.
+
+The rules that follow from this:
+
+- **A failed update never removes a working game.** A fetch that fails downgrades
+  the badge to `OFFLINE` and leaves the checkout alone.
+- **Coming-soon entries never touch the network.** They structurally carry no
+  repository, ref or entrypoint, so there is nothing to clone.
+- **Nothing outside the cache is ever executed.** Every entrypoint is resolved
+  against its own checkout directory and rejected if it escapes — `..`, absolute
+  paths and symlink tricks all fail validation before a process is spawned.
+- **`--no-sync` is a hard promise.** In offline mode `git` is not invoked at all.
+
+## Screenshots
+
+Three deliberately different compositions of the same six games. All are
+rendered from the real view code by `python -m tools.generate_previews`, at the
+cabinet's exact 800×600, and a test fails if they drift out of date.
+
+They show the shipped `data/games.json` exactly as a healthy cabinet would —
+one playable game and five in development — so the header tally is the launcher's
+own arithmetic, not a marketing number. Nothing here is a mock-up.
+
+`docs/screenshots/render-manifest.json` records the SHA-256 of every PNG, a
+fingerprint of the code and data that produced them, and the Pygame/SDL_ttf
+build that rasterised them. `tests/test_previews.py` recomputes the fingerprint
+and tells you to regenerate if the UI changed — that check is exact and runs
+everywhere. The stricter pixel-for-pixel comparison is skipped, with a message
+saying so, when your Pygame differs from the recorded one: different SDL_ttf
+builds antialias the same bundled font differently, so identical UI produces
+different bytes. Regenerate on any machine; the fingerprint is what has to
+match, not the pixels.
+
+### Grid — *see everything at once*
+
+Six equal cards in two rows of three, under a persistent status strip. The reading
+order is flat and scannable; focus is carried by a raised card, a bright rule and a
+glow rather than by size.
+
+![Grid view](docs/screenshots/grid.png)
+
+### Carousel — *one game, properly introduced*
+
+A single hero card centre stage, flanked by dimmed neighbours, over a full-width
+description panel. Position dots replace the strip's card ticks, and the strip's
+trailing text becomes the selected game's own status detail.
+
+![Carousel view](docs/screenshots/carousel.png)
+
+### Cover Flow — *the arcade showpiece*
+
+A pseudo-3D shelf: cards recede in perspective with depth-scaled dimming, sitting
+on a reflective floor under a horizon glow. The selected title sits below the
+shelf where nothing overlaps it.
+
+![Cover Flow view](docs/screenshots/cover-flow.png)
+
+### Status badges — *reference sheet*
+
+Not a gallery screenshot. With the current manifest an honest frame can only ever
+contain `PLAYABLE` and `COMING SOON`, because the other four states are reached by
+syncing and a coming-soon entry is never synced. Rather than invent states for real
+club games, the full vocabulary is shown here — drawn by the same
+`draw_status_badge` the cards use, so the two can never drift apart — alongside the
+banner the supervisor raises when a game exits badly.
+
+![Status badge reference](docs/screenshots/status-badges.png)
+
+## Changing the default gallery mode
+
+The mode shown when the cabinet boots is `default_view` in
+`config/launcher.json`:
+
+```json
+{
+  "default_view": "carousel"
+}
+```
+
+Valid values are `grid`, `carousel` and `cover-flow`. To try one without editing
+the file:
+
+```bash
+ARCADE_LAUNCHER_VIEW=cover-flow python main.py     # Linux / macOS
+$env:ARCADE_LAUNCHER_VIEW='cover-flow'; python main.py   # PowerShell
+```
+
+The same file also holds `fullscreen`, `frame_rate`, `sync_on_start`,
+`nav_initial_delay_ms`, `nav_repeat_ms`, `axis_deadzone` and `network_timeout_s`.
+An invalid value is reported and replaced with the default rather than crashing
+the cabinet.
+
+## Adding a game
+
+The gallery is **curated**: it shows exactly what `data/games.json` lists, in that
+order. Nothing is discovered automatically, because an arcade at a club fair is
+the wrong place to find out that somebody's work-in-progress does not start.
+
+Add an entry and open a pull request:
+
+```json
+{
+  "id": "flappy-scotty",
+  "title": "Flappy Scotty",
+  "description": "Navigate through tricky obstacles and protect Scotty.",
+  "runtime": "python",
+  "launchable": true,
+  "repository": "https://github.com/GDC-CMU/FlappyScotty.git",
+  "ref": "main",
+  "entrypoint": "main.py",
+  "art": { "motif": "flight", "palette": ["electric_cyan", "warm_amber", "ink"], "seed": 3303 }
+}
+```
+
+| Field | Required | Notes |
+| --- | --- | --- |
+| `id` | yes | Lowercase, `a–z 0–9 -`. Also the cache directory name. |
+| `title` | yes | Shown on the card. |
+| `description` | yes | One or two sentences; the views wrap it for you. |
+| `runtime` | yes | `python` today. |
+| `launchable` | yes | `false` renders a `COMING SOON` card and nothing is cloned. |
+| `repository` | if launchable | Must be `https://`. `git@`, `http://` and `file://` are rejected. |
+| `ref` | if launchable | Branch or tag to pin. |
+| `entrypoint` | if launchable | Repo-relative path. Must stay inside the checkout. |
+| `note` | no | Small print under the description. |
+| `art` | no | `motif`, a three-colour `palette` and a `seed` for the generated cover. |
+
+Approving a game means flipping `launchable` to `true` and filling in
+`repository`, `ref` and `entrypoint`. Then:
+
+```bash
+python -m unittest discover -s tests -v    # validates the shipped manifest
+python -m tools.generate_previews          # refresh the screenshots
+```
+
+The manifest is validated at start-up. A malformed entry is a hard failure with a
+named field and a readable message — the cabinet tells you which game is wrong.
+
+## What a game must provide
+
+To be launchable from this gallery, a game must:
+
+1. **Be a public repository under `https://`.** Cloned shallow, single-branch,
+   pinned to `ref`.
+2. **Start from one file.** Run as `[sys.executable, "<entrypoint>"]` with the
+   working directory set to its own checkout. Relative asset paths therefore work
+   unchanged.
+3. **Own the display.** The launcher has fully released SDL. The game calls
+   `pygame.init()` and opens its own window, exactly as it would standalone.
+4. **Exit on `P1` (button 5).** `sys.exit(0)` is enough. That is what returns the
+   visitor to the gallery.
+5. **Exit eventually.** The launcher waits for the child. A game that never exits
+   holds the cabinet.
+6. **Not require the network at runtime.** The fair's Wi-Fi will not be there.
+
+No import of the launcher, no shared globals, no subclassing. Games stay
+standalone programs — `StreetFighter` runs from this gallery **unmodified**.
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| Branded error screen at start-up | The manifest or config file is invalid, or unreadable | The screen names the file and the field. Fix it and re-run. |
+| A card shows `UNAVAILABLE` | The game has never cloned successfully here | Check the network, then `python main.py --verbose` and read the git error. |
+| Every card shows `CACHED OFFLINE` | No network, but the cache is good | Nothing to do — cached games still play. |
+| `COMING SOON` on a released game | `launchable` is still `false` | Set it to `true` and fill in `repository`, `ref`, `entrypoint`. |
+| "That game isn't ready yet" toast | You pressed Play on a non-playable card | Expected. The launcher refuses rather than failing halfway. |
+| Game starts, then the gallery reappears with a banner | The child exited non-zero | The banner shows the exit code; `--verbose` logs the child's output. |
+| Joystick does nothing | It was plugged in after start-up | Hot-plug is handled; if not, restart the launcher. |
+| Nothing renders / black screen off-cabinet | No display available | `SDL_VIDEODRIVER=dummy` for headless runs, or use the preview tool. |
+| Black screen on the cabinet, launcher never appears | `cmu_graphics` ships a Pygame shim that can win the import and shadow the real module | Already handled: `launcher/ui/pygame_runtime.py` detects the shim, drops only its `sys.path` entry and re-imports. If it still fails you get a branded screen, not a black one — `python main.py --verbose` names what loaded. |
+| "manifest not found" on the cabinet only | Something resolved a repository file relative to the working directory, which the arcade menu does not guarantee | Already handled: every path derives from `launcher/paths.py`. If this reappears, `python -m unittest discover -s tests -v` will point at the offending file. |
+| `pygame.error: No available video device` | Headless shell | Same as above. |
+| Screenshot tests fail right after cloning | Your Pygame/SDL_ttf differs from the one that generated the committed PNGs | Not expected any more — that comparison now skips itself with an explanatory message. If a screenshot test *does* fail it means the UI really did change: run `python -m tools.generate_previews` and commit the result. |
+
+## Club-fair preflight
+
+Ten minutes before the doors open, on the cabinet:
+
+1. `git pull` — the cabinet menu does this, but confirm it succeeded.
+2. `python -m pip install -r requirements.txt` — confirm `pygame-ce` is present.
+3. `python -m unittest discover -s tests -v` — must be all green.
+4. **While you still have network**, run `python main.py` once and wait for every
+   card to leave `UPDATING`. This fills the cache for the day.
+5. Check the badges: every game you intend to demo reads `PLAYABLE`.
+6. Launch each demo game and press `P1` — confirm you land back at the gallery.
+7. From the gallery press `P1` — confirm you land back at the arcade menu.
+8. Press `Select` three times — confirm all three views render and come back
+   around to where you started.
+9. Confirm the mode you want visitors to see first is the one that boots
+   (`default_view`).
+10. **Unplug the network and repeat step 6.** Cached games must still play. This
+    is the check that actually saves the day.
+
+---
+
+<p align="center">
+  <sub>Built by the Game Dev Club · Carnegie Mellon University in Qatar</sub>
+</p>

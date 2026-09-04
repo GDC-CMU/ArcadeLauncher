@@ -1,0 +1,11 @@
+{
+  "_comment": "ArcadeLauncher settings. Every value here can be changed without touching code. 'default_view' is the gallery mode shown at start-up: grid | carousel | cover-flow. It can also be overridden for a single run with the ARCADE_LAUNCHER_VIEW environment variable.",
+  "default_view": "carousel",
+  "fullscreen": true,
+  "frame_rate": 60,
+  "sync_on_start": true,
+  "nav_initial_delay_ms": 380,
+  "nav_repeat_ms": 140,
+  "axis_deadzone": 0.5,
+  "network_timeout_s": 45
+}

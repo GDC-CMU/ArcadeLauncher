@@ -1,0 +1,51 @@
+{
+  "environment": {
+    "default_font": "freesansbold.ttf",
+    "default_font_sha256": "bf9251269f11e4b35582a99376096deee3d0c4973a459cbd97b0bebc01f440ad",
+    "fingerprint": "e4c41af9ffc6b6078ef2fdfe49f7b448f00b6daab67e09dbf7bc347441447980",
+    "pygame": "2.5.2",
+    "pygame_flavour": "pygame",
+    "sdl": [
+      2,
+      28,
+      3
+    ],
+    "sdl_ttf": [
+      2,
+      20,
+      1
+    ]
+  },
+  "generated_by": "python -m tools.generate_previews",
+  "screenshots": {
+    "carousel.png": {
+      "sha256": "ebc872aa27b5e188c83cd0f1840a06082c0c75c505f3f678967168a947b7f250",
+      "size": [
+        800,
+        600
+      ]
+    },
+    "cover-flow.png": {
+      "sha256": "3e382b9ff82156e48b57ef9641374854f03d743f92848921dbab31178d87f458",
+      "size": [
+        800,
+        600
+      ]
+    },
+    "grid.png": {
+      "sha256": "8f58836852e8487d704d44cc3fbbcdb0d3de351fb558e8c87daea7252509446f",
+      "size": [
+        800,
+        600
+      ]
+    },
+    "status-badges.png": {
+      "sha256": "b6cae4f9eb68284a1aa20cfa7b489386ff75bf6778d1d0f3bad16bafc504ae4f",
+      "size": [
+        800,
+        600
+      ]
+    }
+  },
+  "source_fingerprint": "b69b463457d032a3fe6046538767b1216274854f9d069aa5fc892439f6d91d58"
+}

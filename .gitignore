@@ -1,0 +1,28 @@
+# Cloned game checkouts and child-process logs. Never committed: the launcher
+# rebuilds this from data/games.json on first run.
+.arcade-cache/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Child-process capture files, if one ever survives a hard kill.
+*.child.log
+
+# Local environment overrides
+.env
+
+# Local planning and review notes, not part of the shipped launcher.
+.goals/
+
+# OS noise
+.DS_Store
+Thumbs.db
+desktop.ini

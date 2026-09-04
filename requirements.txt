@@ -1,0 +1,7 @@
+# The arcade cabinet runs `pip install -r requirements.txt` before `main.py`.
+#
+# pygame-ce is the maintained fork of pygame and is what StreetFighter already
+# depends on, so pinning the same family keeps one SDL on the box instead of
+# two competing installs. Everything else the launcher needs is stdlib, on
+# purpose: fewer moving parts to break the night before a demo.
+pygame-ce>=2.4,<3

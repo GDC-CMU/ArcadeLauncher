@@ -19,6 +19,22 @@
       }
     },
     {
+      "id": "pacdawg",
+      "title": "Pac Dawg",
+      "description": "A maze chase where Scotty hoovers up kibble across the CMU-Q campus while four rivals hunt him down.",
+      "runtime": "python",
+      "launchable": true,
+      "repository": "https://github.com/GDC-CMU/PacDawg.git",
+      "ref": "main",
+      "entrypoint": "main.py",
+      "note": "Press P1 in-game to return to this gallery.",
+      "art": {
+        "motif": "maze",
+        "palette": ["mint", "cmu_red", "ink"],
+        "seed": 7707
+      }
+    },
+    {
       "id": "pass-the-game",
       "title": "Pass The Game",
       "description": "Start with a simple game. Pass it on. Watch it evolve into something unpredictable. No rules, just creativity and surprises.",

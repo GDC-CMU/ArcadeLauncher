@@ -158,12 +158,15 @@ class LoopTests(unittest.TestCase):
 
     def test_coming_soon_card_refuses_to_launch(self) -> None:
         """Criterion E6: pressing launch on a disabled game explains itself."""
-        script = [
-            [key_event(pygame.K_RIGHT)],
-            [key_event(pygame.K_RIGHT, down=False)],
-            [button_event(BUTTON_LAUNCH)],
-            [key_event(pygame.K_ESCAPE)],
-        ]
+        # Step to the first coming-soon entry rather than assuming its index,
+        # since the second card is now the launchable PacDawg.
+        target = next(index for index, game in enumerate(MANIFEST) if not game.launchable)
+        script = []
+        for _ in range(target):
+            script.append([key_event(pygame.K_RIGHT)])
+            script.append([key_event(pygame.K_RIGHT, down=False)])
+        script.append([button_event(BUTTON_LAUNCH)])
+        script.append([key_event(pygame.K_ESCAPE)])
         _, outcome = self.run_session(script)
         self.assertIs(outcome.action, UiAction.QUIT, "a disabled game must not launch")
 

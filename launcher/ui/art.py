@@ -373,6 +373,97 @@ def _motif_orbit(surface: pygame.Surface, colors: tuple[Color, Color, Color], rn
     )
 
 
+def _motif_maze(surface: pygame.Surface, colors: tuple[Color, Color, Color], rng: random.Random) -> None:
+    """Maze corridors, scattered kibble and a chomping terrier -- Pac Dawg."""
+    primary, secondary, dark = colors
+    surface.fill(shade(dark, 1.05))
+
+    # Maze walls: an outer loop plus a handful of L-shaped partitions, which
+    # reads as "maze" without becoming a busy full grid of lines.
+    wall = shade(primary, 0.85)
+    _rect(surface, 0.08, 0.10, 0.84, 0.04, wall)
+    _rect(surface, 0.08, 0.86, 0.84, 0.04, wall)
+    _rect(surface, 0.08, 0.10, 0.04, 0.80, wall)
+    _rect(surface, 0.88, 0.10, 0.04, 0.80, wall)
+    _rect(surface, 0.24, 0.10, 0.04, 0.30, wall)
+    _rect(surface, 0.24, 0.36, 0.20, 0.04, wall)
+    _rect(surface, 0.60, 0.10, 0.04, 0.26, wall)
+    _rect(surface, 0.40, 0.32, 0.24, 0.04, wall)
+    _rect(surface, 0.36, 0.58, 0.04, 0.28, wall)
+    _rect(surface, 0.36, 0.58, 0.30, 0.04, wall)
+    _rect(surface, 0.68, 0.50, 0.04, 0.36, wall)
+    _rect(surface, 0.44, 0.72, 0.28, 0.04, wall)
+
+    # Kibble pellets scattered along the open corridors.
+    pellet = mix(PALETTE["bone"], primary, 0.15)
+    for fx, fy in (
+        (0.14, 0.18), (0.14, 0.26), (0.14, 0.46), (0.14, 0.70), (0.14, 0.78),
+        (0.30, 0.18), (0.46, 0.18), (0.52, 0.46), (0.60, 0.62), (0.76, 0.20),
+        (0.80, 0.40), (0.80, 0.60), (0.80, 0.78), (0.46, 0.80), (0.60, 0.80),
+    ):
+        _rect(surface, fx, fy, 0.03, 0.03, pellet)
+
+    # A bigger power-kibble, lower-left.
+    _ellipse(surface, 0.145, 0.545, 0.06, 0.06, mix(PALETTE["bone"], primary, 0.35))
+
+    # Four small rival chasers -- "four rivals hunt him down" -- evenly spread
+    # so none crowds Pac-Dawg himself.
+    rival_tints = (
+        secondary,
+        mix(secondary, PALETTE["bone"], 0.4),
+        mix(secondary, primary, 0.5),
+        shade(secondary, 1.3),
+    )
+    for tint, (fx, fy) in zip(
+        rival_tints, ((0.74, 0.16), (0.50, 0.60), (0.24, 0.66), (0.70, 0.72))
+    ):
+        _rect(surface, fx, fy, 0.07, 0.055, tint)
+        _rect(surface, fx + 0.008, fy + 0.05, 0.016, 0.016, shade(dark, 0.85))
+        _rect(surface, fx + 0.045, fy + 0.05, 0.016, 0.016, shade(dark, 0.85))
+
+    # Pac-Dawg: a round chomping head with two terrier ears, mid-corridor.
+    head_x, head_y, radius = 0.30, 0.48, 0.11
+    mouth = math.radians(32)
+    _ellipse(
+        surface,
+        head_x - radius,
+        head_y - radius,
+        radius * 2,
+        radius * 2,
+        secondary,
+    )
+    _polygon(
+        surface,
+        [
+            (head_x, head_y),
+            (head_x + radius * 1.2, head_y - radius * math.sin(mouth) * 1.3),
+            (head_x + radius * 1.2, head_y + radius * math.sin(mouth) * 1.3),
+        ],
+        shade(dark, 0.95),
+    )
+    _polygon(
+        surface,
+        [
+            (head_x - 0.07, head_y - radius + 0.01),
+            (head_x - 0.025, head_y - radius - 0.07),
+            (head_x + 0.005, head_y - radius + 0.02),
+        ],
+        secondary,
+    )
+    _polygon(
+        surface,
+        [
+            (head_x + 0.03, head_y - radius + 0.015),
+            (head_x + 0.075, head_y - radius - 0.055),
+            (head_x + 0.095, head_y - radius + 0.03),
+        ],
+        secondary,
+    )
+    _rect(surface, head_x - 0.015, head_y - radius * 0.45, 0.022, 0.022, shade(dark, 0.8))
+
+    _speckle(surface, rng, mix(primary, PALETTE["bone"], 0.5), 10, ceiling=0.12)
+
+
 MOTIF_RENDERERS = {
     "duel": _motif_duel,
     "relay": _motif_relay,
@@ -380,6 +471,7 @@ MOTIF_RENDERERS = {
     "hazard": _motif_hazard,
     "ember": _motif_ember,
     "orbit": _motif_orbit,
+    "maze": _motif_maze,
 }
 
 

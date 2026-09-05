@@ -38,16 +38,18 @@ class ShippedManifestTests(unittest.TestCase):
     def test_shipped_manifest_loads(self) -> None:
         manifest = load_manifest(MANIFEST_FILE)
         self.assertEqual(manifest.version, SUPPORTED_MANIFEST_VERSION)
-        self.assertEqual(len(manifest), 6)
+        self.assertEqual(len(manifest), 7)
 
     def test_shipped_manifest_has_unique_ids(self) -> None:
         manifest = load_manifest(MANIFEST_FILE)
         ids = [game.id for game in manifest]
         self.assertEqual(len(ids), len(set(ids)))
 
-    def test_only_streetfighter_is_launchable(self) -> None:
+    def test_only_streetfighter_and_pacdawg_are_launchable(self) -> None:
         manifest = load_manifest(MANIFEST_FILE)
-        self.assertEqual([game.id for game in manifest.launchable], ["streetfighter"])
+        self.assertEqual(
+            [game.id for game in manifest.launchable], ["streetfighter", "pacdawg"]
+        )
 
     def test_every_game_has_distinct_card_art(self) -> None:
         manifest = load_manifest(MANIFEST_FILE)

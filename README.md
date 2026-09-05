@@ -304,7 +304,7 @@ The rules that follow from this:
 
 ## Screenshots
 
-Three deliberately different compositions of the same six games, under one
+Three deliberately different compositions of the same seven games, under one
 identical header. All are rendered from the real view code by `python -m
 tools.generate_previews`, at the cabinet's exact 800×600, and a test fails if
 they drift out of date.
@@ -315,7 +315,7 @@ same size, same position. Everything that makes the three modes look
 different lives in the content area below it.
 
 They show the shipped `data/games.json` exactly as a healthy cabinet would --
-one playable game and five in development. Availability lives entirely on the
+two playable games and five in development. Availability lives entirely on the
 per-card badge; nothing here is a mock-up.
 
 `docs/screenshots/render-manifest.json` records the SHA-256 of every PNG, a

@@ -35,6 +35,22 @@
       }
     },
     {
+      "id": "headscotter",
+      "title": "Head Scotter",
+      "description": "Head-soccer where Scotty and a rival bounce around a pitch trying to bundle the ball into the net.",
+      "runtime": "python",
+      "launchable": true,
+      "repository": "https://github.com/GDC-CMU/HeadScotter.git",
+      "ref": "main",
+      "entrypoint": "main.py",
+      "note": "Press P1 in-game to go back a level.",
+      "art": {
+        "motif": "pitch",
+        "palette": ["mint", "electric_cyan", "ink"],
+        "seed": 8808
+      }
+    },
+    {
       "id": "pass-the-game",
       "title": "Pass The Game",
       "description": "Start with a simple game. Pass it on. Watch it evolve into something unpredictable. No rules, just creativity and surprises.",

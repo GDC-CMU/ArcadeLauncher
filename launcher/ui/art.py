@@ -464,6 +464,135 @@ def _motif_maze(surface: pygame.Surface, colors: tuple[Color, Color, Color], rng
     _speckle(surface, rng, mix(primary, PALETTE["bone"], 0.5), 10, ceiling=0.12)
 
 
+def _motif_pitch(surface: pygame.Surface, colors: tuple[Color, Color, Color], rng: random.Random) -> None:
+    """A head-soccer pitch: goals at both ends, a ball and two big-headed
+    rivals squaring off -- Head Scotter.
+
+    The characters are dark silhouettes (the same high-contrast trick
+    ``_motif_duel`` uses for its fighters) rather than tints of *primary* or
+    *secondary* mixed toward ``bone`` -- *primary* is already spent on the
+    grass here, so a pale mix of the other two reads as a washed-out blob
+    sitting on a background of a similar value. A near-black silhouette pops
+    against the pitch regardless of which two colours a manifest entry picks,
+    and a single accent stripe per jersey is enough to tell the two sides
+    apart.
+    """
+    primary, secondary, dark = colors
+    body = shade(dark, 0.55)
+
+    # Night-match sky with a few floodlights.
+    _sky(surface, shade(dark, 1.2), shade(dark, 0.8))
+    for light_x in (0.14, 0.5, 0.86):
+        _rect(surface, light_x - 0.03, 0.03, 0.06, 0.022, mix(PALETTE["bone"], secondary, 0.2))
+        _rect(surface, light_x - 0.006, 0.052, 0.012, 0.05, shade(dark, 0.7))
+
+    # Grass, mowed into a few bold bands -- fewer, thicker stripes than a
+    # dense set of thin ones, which is what actually reads at card scale.
+    field_top = 0.34
+    band = (1.0 - field_top) / 4.0
+    for index in range(4):
+        tone = primary if index % 2 == 0 else shade(primary, 0.82)
+        _rect(surface, 0.0, field_top + index * band, 1.0, band + 0.01, tone)
+
+    # Halfway line and centre spot.
+    line = mix(PALETTE["bone"], primary, 0.55)
+    _rect(surface, 0.485, field_top, 0.03, 1.0 - field_top, line)
+    _ellipse(surface, 0.465, 0.585, 0.07, 0.07, line)
+
+    def _goal(near_x: float, direction: int) -> None:
+        """Posts, crossbar and net opening onto the field from the edge."""
+        post = PALETTE["bone"]
+        far_x = near_x + direction * 0.12
+        _rect(surface, near_x, 0.42, 0.02, 0.32, post)
+        _rect(surface, far_x, 0.42, 0.02, 0.32, post)
+        _rect(surface, min(near_x, far_x), 0.42, 0.14, 0.02, post)
+        net = shade(post, 1.15)
+        for i in range(3):
+            nx = near_x + direction * (0.03 + i * 0.03)
+            _line(surface, (nx, 0.44), (nx, 0.71), net)
+        for j in range(4):
+            ny = 0.44 + j * 0.07
+            _line(surface, (near_x, ny), (far_x, ny), net)
+
+    _goal(0.01, direction=1)
+    _goal(0.99, direction=-1)
+
+    def _player(head_x: float, accent: Color, ears: bool) -> None:
+        """One big-headed rival: dark silhouette, single accent stripe."""
+        head_y = 0.56
+        radius = 0.115
+        facing = 1 if head_x < 0.5 else -1
+
+        if ears:
+            # Two upright terrier ears, same silhouette colour as the head
+            # so they read as part of one continuous shape.
+            _polygon(
+                surface,
+                [
+                    (head_x - radius * 0.75, head_y - radius * 0.65),
+                    (head_x - radius * 0.30, head_y - radius * 1.55),
+                    (head_x - radius * 0.05, head_y - radius * 0.75),
+                ],
+                body,
+            )
+            _polygon(
+                surface,
+                [
+                    (head_x + radius * 0.75, head_y - radius * 0.65),
+                    (head_x + radius * 0.30, head_y - radius * 1.55),
+                    (head_x + radius * 0.05, head_y - radius * 0.75),
+                ],
+                body,
+            )
+        else:
+            # A rounded mohawk band marks the rival's head instead of ears.
+            _ellipse(
+                surface,
+                head_x - radius * 0.55,
+                head_y - radius * 1.35,
+                radius * 1.1,
+                radius * 0.9,
+                accent,
+            )
+
+        _ellipse(surface, head_x - radius, head_y - radius, radius * 2, radius * 2, body)
+        eye_x = head_x + facing * radius * 0.35
+        _rect(surface, eye_x - 0.014, head_y - 0.02, 0.028, 0.028, PALETTE["bone"])
+
+        # Torso: attaches directly under the head (no gap), with one accent
+        # stripe so the two sides are distinguishable at a glance.
+        torso_top = head_y + radius - 0.01
+        _rect(surface, head_x - 0.075, torso_top, 0.15, 0.16, body)
+        _rect(surface, head_x - 0.075, torso_top + 0.06, 0.15, 0.035, accent)
+
+        # An even, planted stance -- two short legs, two boot blocks, both
+        # sides identical. A kicking pose was tried here first: an extended
+        # leg reaching toward the ball, but at the sizes these cards actually
+        # render at, its length and near-uniform thickness left it reading
+        # as a detached slab rather than a limb. The ball sitting between
+        # the two players already carries the action; the stance does not
+        # need to.
+        legs_top = torso_top + 0.16 - 0.01
+        _rect(surface, head_x - 0.075, legs_top, 0.05, 0.11, body)
+        _rect(surface, head_x + 0.025, legs_top, 0.05, 0.11, body)
+        _rect(surface, head_x - 0.08, legs_top + 0.09, 0.06, 0.04, shade(body, 1.35))
+        _rect(surface, head_x + 0.02, legs_top + 0.09, 0.06, 0.04, shade(body, 1.35))
+
+    _player(0.28, PALETTE["warm_amber"], ears=True)
+    _player(0.72, secondary, ears=False)
+
+    # The ball, lifted just off the ground between the two heads so it reads
+    # as airborne, with a dark ring so it pops against the pitch regardless
+    # of what falls behind it.
+    ball_x, ball_y = 0.5, 0.56
+    _ellipse(surface, ball_x - 0.065, ball_y - 0.065, 0.13, 0.13, shade(dark, 0.5))
+    _ellipse(surface, ball_x - 0.05, ball_y - 0.05, 0.10, 0.10, PALETTE["bone"])
+    for dx, dy in ((-0.012, -0.01), (0.014, -0.006), (0.0, 0.016)):
+        _rect(surface, ball_x + dx - 0.008, ball_y + dy - 0.008, 0.016, 0.016, shade(dark, 0.6))
+
+    _speckle(surface, rng, mix(PALETTE["bone"], primary, 0.4), 14, ceiling=field_top)
+
+
 MOTIF_RENDERERS = {
     "duel": _motif_duel,
     "relay": _motif_relay,
@@ -472,6 +601,7 @@ MOTIF_RENDERERS = {
     "ember": _motif_ember,
     "orbit": _motif_orbit,
     "maze": _motif_maze,
+    "pitch": _motif_pitch,
 }
 
 

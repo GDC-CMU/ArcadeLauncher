@@ -96,7 +96,7 @@ PINNED_TIME_MS = 1_400
 
 #: Which card each shot selects, chosen to show a different game every time.
 #: Carousel and Cover Flow both put the selected card's detail text front and
-#: centre, so those two point at the manifest's two launchable games -- the
+#: centre, so those two point at the manifest's launchable games -- the
 #: only way a screenshot can show the "updated <commit>" detail that answers
 #: "am I running the latest build?" at the cabinet. Grid never renders that
 #: detail text at all, so its selection is free to be any other card.

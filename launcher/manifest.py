@@ -53,6 +53,7 @@ SUPPORTED_MOTIFS: tuple[str, ...] = (
     "ember",
     "orbit",
     "maze",
+    "pitch",
 )
 
 _ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$")

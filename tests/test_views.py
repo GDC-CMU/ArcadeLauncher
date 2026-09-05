@@ -355,10 +355,10 @@ class GridScrollTests(unittest.TestCase):
     real grid always needed both axes anyway.
     """
 
-    COUNTS = (1, 2, 6, 7, 9, 10, 11, 12, 20)
+    COUNTS = (1, 2, 6, 7, 8, 9, 10, 11, 12, 20)
 
     def test_no_scroll_needed_when_everything_fits(self) -> None:
-        for count in (1, 2, 3, 6, 7, 9):
+        for count in (1, 2, 3, 6, 7, 8, 9):
             for index in range(count):
                 with self.subTest(count=count, index=index):
                     self.assertEqual(grid.target_scroll(index, count), 0.0)
@@ -470,7 +470,7 @@ class GridRenderingTests(HeadlessCase):
     card on screen, and never more than three rows of it visible at once.
     """
 
-    COUNTS = (1, 2, 3, 6, 7, 9, 10, 12, 20)
+    COUNTS = (1, 2, 3, 6, 7, 8, 9, 10, 12, 20)
 
     @staticmethod
     def _content_rect() -> pygame.Rect:
@@ -765,7 +765,7 @@ class CoverFlowSymmetryTests(unittest.TestCase):
     cutoff was crossed).
     """
 
-    COUNTS = (1, 2, 3, 4, 5, 6, 7, 12, 20)
+    COUNTS = (1, 2, 3, 4, 5, 6, 7, 8, 12, 20)
 
     def test_left_and_right_counts_are_equal_at_rest(self) -> None:
         """The steady-state fan -- what the visitor actually looks at -- must
@@ -839,7 +839,7 @@ class CoverFlowSymmetryTests(unittest.TestCase):
 class CarouselFadeTests(unittest.TestCase):
     """The same pop/symmetry fix, applied to Carousel's neighbours."""
 
-    COUNTS = (1, 2, 3, 4, 5, 6, 7, 12, 20)
+    COUNTS = (1, 2, 3, 4, 5, 6, 7, 8, 12, 20)
 
     def test_left_and_right_counts_are_equal_at_rest(self) -> None:
         for count in self.COUNTS:

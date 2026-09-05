@@ -28,6 +28,7 @@ from .ui import SCREEN_SIZE
 from .ui.pygame_runtime import pygame
 from .ui.scene import Renderer
 from .ui.viewmodel import GalleryFrame, Toast
+from .ui.views.grid import target_scroll as grid_target_scroll
 from .viewmodes import ViewMode
 
 __all__ = ["KEY_COMMANDS", "KEY_DIRECTIONS", "GallerySession"]
@@ -295,6 +296,7 @@ class GallerySession:
         notice = state.notice
         toast: Toast | None = None
         scroll = float(index)
+        grid_scroll = grid_target_scroll(index, len(self.manifest))
         focus_ms = 0
         elapsed_ms = 0
 
@@ -366,6 +368,9 @@ class GallerySession:
                 notice = None
 
             scroll = self._glide(scroll, index, delta_ms, len(self.manifest))
+            grid_scroll = self._glide_linear(
+                grid_scroll, grid_target_scroll(index, len(self.manifest)), delta_ms
+            )
             if toast is not None and toast.is_expired(elapsed_ms):
                 toast = None
 
@@ -376,6 +381,7 @@ class GallerySession:
                 view_mode=mode,
                 time_ms=elapsed_ms,
                 scroll=scroll,
+                grid_scroll=grid_scroll,
                 focus_ms=focus_ms,
                 notice=notice,
                 toast=toast,
@@ -445,6 +451,18 @@ class GallerySession:
         if abs(distance) < 0.01:
             return float(index % count)
         return (scroll + distance * min(1.0, delta_ms / 90.0)) % count
+
+    @staticmethod
+    def _glide_linear(current: float, target: float, delta_ms: int) -> float:
+        """Ease *current* towards *target* using the same frame-delta-driven
+        approach as :meth:`_glide`, without the wrap-around distance
+        calculation -- the Grid view's vertical row scroll is a straight
+        line, not a cycle, so there is no "shortest way around" to take.
+        """
+        distance = target - current
+        if abs(distance) < 0.01:
+            return target
+        return current + distance * min(1.0, delta_ms / 90.0)
 
     def _status(self, game_id: str) -> GameStatus:
         state = self.states.get(game_id)

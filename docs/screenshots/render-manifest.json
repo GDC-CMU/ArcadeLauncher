@@ -19,33 +19,33 @@
   "generated_by": "python -m tools.generate_previews",
   "screenshots": {
     "carousel.png": {
-      "sha256": "a2a687ccca7b367238e8522b0db619418d03225920f54cb728fdd16af8d33d8a",
+      "sha256": "af46f9524ab582d3fc4f29679ed19c00d9c3dc3b55d0b0df38c536e910dbee72",
       "size": [
         800,
         600
       ]
     },
     "cover-flow.png": {
-      "sha256": "eef2877cb2f703721292ff95bd6ccecd093623a4de725ec3c7b90e4c3619aeb3",
+      "sha256": "d5adc21110efb4e7c97a7cb29c5f63d7ccb77f8ee1ca75a65da8e7f85374d61a",
       "size": [
         800,
         600
       ]
     },
     "grid.png": {
-      "sha256": "34e9968f077690ac7ab4f90c05958a1a12cdb3cf69ccc4b6ae78a9c32136dcce",
+      "sha256": "8d684efb850171bef4328cd97ab8a59d9560a103f09756241106870fe51f1d2b",
       "size": [
         800,
         600
       ]
     },
     "status-badges.png": {
-      "sha256": "8289f45839338f83e66307038164e1ec255b9eb0583078b9339b003df6798457",
+      "sha256": "8ad8c5fc6842caf803ce071077e968c590c4e1c9245d40bfe89142bbd6e5f13f",
       "size": [
         800,
         600
       ]
     }
   },
-  "source_fingerprint": "827c642c0e55099c577a134777ddfc4ac99aebc7b2992f30ded0d040e56f6749"
+  "source_fingerprint": "f311e626091133390ef6d52619a6770b404cfeac7ad80c173d6125cb2404640b"
 }

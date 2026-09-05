@@ -330,11 +330,14 @@ match, not the pixels.
 
 ### Grid — *see everything at once*
 
-A board of equal cards -- up to two rows of three -- with a subtle page dot
-row once the catalogue holds more than six. The reading order is flat and
-scannable, and navigation flows straight across row and page edges instead of
-stopping at them, so it keeps working as the catalogue grows. Focus is carried
-by a raised card, a bright rule and a glow rather than by size.
+A board of equal cards, always three columns -- four would be unreadable at
+800x600 -- sized to the rows actually needed: 1-3 games get one big row, 4-6
+get two, and 7 or more get the permanent maximum of three. Past nine games the
+board scrolls vertically instead of growing a fourth row or paginating:
+pressing down past the last visible row eases the view down by exactly enough
+to keep the selection in sight, with a restrained sliver of a scrollbar as the
+only hint that there is more below. Focus is carried by a raised card, a
+bright rule and a glow rather than by size.
 
 ![Grid view](docs/screenshots/grid.png)
 

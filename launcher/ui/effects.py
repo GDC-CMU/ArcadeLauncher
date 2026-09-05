@@ -240,7 +240,7 @@ def vertical_gradient(
     return surface
 
 
-def vignette(size: tuple[int, int], strength: int = 108, steps: int = 26) -> pygame.Surface:
+def vignette(size: tuple[int, int], strength: int = 36, steps: int = 26) -> pygame.Surface:
     """Build a rectangular vignette that pushes focus towards the centre.
 
     Each ring's stroke width is sized to exactly match the gap to the next
@@ -249,6 +249,15 @@ def vignette(size: tuple[int, int], strength: int = 108, steps: int = 26) -> pyg
     step -- ``steps - index`` px, unrelated to the actual gap between rings --
     which left every ring's edge visible as a hard line, the exact "grid of
     lines" complaint this build was asked to fix.
+
+    *strength* was previously 108 -- roughly 42% black in the corners, which
+    read as a heavy drop shadow laid over the whole screen rather than
+    atmosphere. 36 (a third of that) is a hint of focus instead: the corners
+    stay recognisably deep field, not "darkened". The ring geometry (and
+    therefore the smoothness of the gradient) is set by *steps*, not
+    *strength*, so this dimmer default is not any more prone to banding than
+    the old one -- verified by rendering it and inspecting the corners at
+    3x zoom, not just by the arithmetic.
     """
     width, height = size
     surface = pygame.Surface(size, pygame.SRCALPHA)
@@ -267,6 +276,7 @@ def vignette(size: tuple[int, int], strength: int = 108, steps: int = 26) -> pyg
             continue
         pygame.draw.rect(surface, (0, 0, 0, alpha), rect, width=ring_width)
     return surface
+
 
 
 def reflect(surface: pygame.Surface, height: int, fade: int = 130) -> pygame.Surface:

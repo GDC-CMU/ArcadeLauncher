@@ -79,6 +79,9 @@ class GalleryFrame:
             are byte-stable.
         scroll: Smoothed floating-point selection used by the horizontal
             modes, so movement glides rather than snapping.
+        grid_scroll: Smoothed floating-point row offset used by the Grid
+            view's vertical scroll (0 when everything fits without
+            scrolling), eased the same frame-delta-driven way as ``scroll``.
         focus_ms: Milliseconds since the selection last changed; drives the
             focus-in animation.
         notice: Optional banner from the supervisor.
@@ -90,6 +93,7 @@ class GalleryFrame:
     view_mode: ViewMode = ViewMode.CAROUSEL
     time_ms: int = 0
     scroll: float = 0.0
+    grid_scroll: float = 0.0
     focus_ms: int = 0
     notice: Notice | None = None
     toast: Toast | None = None

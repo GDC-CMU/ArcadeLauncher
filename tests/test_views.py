@@ -10,6 +10,7 @@ import support  # noqa: F401 - pins SDL to the dummy drivers before pygame loads
 import unittest
 
 from launcher.input_state import Direction
+from launcher.gallery import GallerySession
 from launcher.manifest import CardArt, GameEntry, Manifest, Runtime, load_manifest
 from launcher.status import GameState, GameStatus, Notice
 from launcher.ui import SCREEN_HEIGHT, SCREEN_SIZE, SCREEN_WIDTH
@@ -175,10 +176,12 @@ class GridNavigationTests(unittest.TestCase):
     """The grid is the only mode with genuine two-dimensional movement.
 
     Navigation flows in reading order across the *whole* catalogue -- item 4
-    -- so it scales to any manifest size instead of a hard-coded 3x2 board.
-    Crossing a row or page edge continues onto the next slot rather than
-    wrapping back to the start of the same row, which is what makes a single
-    rule reach every card whether the catalogue holds 1 game or 20.
+    -- so it scales to any manifest size instead of a hard-coded board.
+    Crossing a row edge continues onto the next row rather than wrapping
+    back to the start of the same row, which is what makes a single rule
+    reach every card whether the catalogue holds 1 game or 20. Scrolling
+    (see :class:`GridScrollTests`) is purely a rendering concern layered on
+    top of this -- navigation itself never paginates or clips.
     """
 
     def setUp(self) -> None:
@@ -226,49 +229,171 @@ class GridNavigationTests(unittest.TestCase):
                 self.assertEqual(seen, set(range(count)))
 
 
-class GridScalingTests(HeadlessCase):
-    """Item 4: the grid must genuinely work for an arbitrary manifest size,
-    not just the six games currently shipped -- rendered, not just navigated.
+class GridLayoutTests(unittest.TestCase):
+    """The permanent board shape: always 3 columns, never 4; up to 3 rows,
+    sized to how many are actually needed rather than always reserving the
+    same fixed height. The client's explicit ceiling: 3x3 is readable, 4x4
+    is not, so the board never grows past it -- it scrolls instead (see
+    :class:`GridScrollTests`).
     """
 
-    def test_every_card_stays_on_screen_for_several_catalogue_sizes(self) -> None:
-        surface_rect = pygame.Rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT)
-        for count in (1, 2, 7, 12, 20):
-            manifest = synthetic_manifest(count)
-            states = {
-                game.id: GameState(game.id, GameStatus.COMING_SOON, "")
-                for game in manifest
-            }
-            for index in (0, count - 1):
-                with self.subTest(count=count, selected=index):
-                    built = GalleryFrame.build(
-                        manifest,
-                        states,
-                        selected_index=index,
-                        view_mode=ViewMode.GRID,
-                        time_ms=900,
-                        scroll=float(index),
-                    )
-                    self.assertEqual(self.renderer.render(built).get_size(), SCREEN_SIZE)
-                    page = index // (GridView.columns * 2)
-                    start = page * GridView.columns * 2
-                    for slot in range(min(GridView.columns * 2, count - start)):
-                        rect = GridView.card_rect(slot)
-                        self.assertTrue(surface_rect.contains(rect), rect)
+    COUNTS = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 20)
+
+    def test_columns_are_always_exactly_three_at_any_count(self) -> None:
+        self.assertEqual(GridView.columns, 3)
+        self.assertEqual(grid.COLUMNS, 3)
+        for count in self.COUNTS:
+            for row in range(grid.rows_needed(count)):
+                with self.subTest(count=count, row=row):
+                    self.assertLessEqual(grid.row_columns(count, row), 3)
+
+    def test_rows_scale_to_the_catalogue_and_never_exceed_three(self) -> None:
+        expected = {
+            1: 1, 2: 1, 3: 1,
+            4: 2, 5: 2, 6: 2,
+            7: 3, 8: 3, 9: 3, 10: 3, 12: 3, 20: 3,
+        }
+        for count, rows in expected.items():
+            with self.subTest(count=count):
+                self.assertEqual(grid.visible_rows(count), rows)
+                self.assertLessEqual(grid.visible_rows(count), grid.MAX_VISIBLE_ROWS)
+
+    def test_cards_grow_as_fewer_rows_are_needed(self) -> None:
+        """1-3 games get large cards; the client accepted smaller ones at
+        3 rows, but only because there was no alternative -- a catalogue
+        that doesn't need 3 rows should not be shrunk to fit them anyway."""
+        self.assertGreater(grid.card_height(1), grid.card_height(2))
+        self.assertGreater(grid.card_height(2), grid.card_height(3))
+
+    def test_scrolling_only_kicks_in_past_nine_games(self) -> None:
+        for count in (1, 2, 3, 4, 5, 6, 7, 8, 9):
+            with self.subTest(count=count):
+                self.assertEqual(grid.max_scroll_rows(count), 0.0)
+        for count in (10, 12, 20):
+            with self.subTest(count=count):
+                self.assertGreater(grid.max_scroll_rows(count), 0.0)
 
 
-class GridPartialPageCenteringTests(unittest.TestCase):
-    """A page short of a full 3x2 board -- the last page of a catalogue whose
-    size isn't a multiple of six, or a short final row on an otherwise full
-    page -- must read as a deliberately centred composition, not a card (or
-    a short row) stranded in the top-left corner with the rest of the screen
-    empty. This is a live regression: a seventh game landed exactly here.
+class GridRowCenteringTests(unittest.TestCase):
+    """A short final row -- now the whole catalogue's actual last row,
+    rather than a page's -- must stay centred under the full rows above it,
+    not hug the left margin. The same rule that used to apply per-page
+    still applies, just to one continuous board instead of six-card pages.
     """
 
-    #: A pixel or two of slack for the floor-division roundings baked into
-    #: CARD_WIDTH/CARD_HEIGHT -- the centring itself must still be exact to
-    #: within that same rounding, not merely "somewhere in the middle".
     TOLERANCE = 2
+
+    @staticmethod
+    def _bbox(rects: list[pygame.Rect]) -> pygame.Rect:
+        return rects[0].unionall(rects[1:]) if len(rects) > 1 else rects[0].copy()
+
+    def test_a_full_row_gets_no_centring_offset(self) -> None:
+        self.assertEqual(grid.row_dx(grid.COLUMNS), 0)
+
+    def test_a_short_final_row_is_centred_under_a_full_row(self) -> None:
+        for count in (4, 5, 7, 8, 10, 11, 20):
+            total_rows = grid.rows_needed(count)
+            last_row = total_rows - 1
+            cols_in_last = grid.row_columns(count, last_row)
+            if cols_in_last == grid.COLUMNS:
+                continue  # nothing short to centre for this count
+            with self.subTest(count=count):
+                row0 = [
+                    GridView.slot_rect(0, column, count, 0.0)
+                    for column in range(grid.row_columns(count, 0))
+                ]
+                last = [
+                    GridView.slot_rect(last_row, column, count, 0.0)
+                    for column in range(cols_in_last)
+                ]
+                self.assertAlmostEqual(
+                    self._bbox(row0).centerx, self._bbox(last).centerx, delta=self.TOLERANCE
+                )
+                # It must actually be nudged inward, not just coincidentally
+                # aligned with the full row's own left edge.
+                self.assertGreater(last[0].left, row0[0].left)
+
+
+class GridScrollTests(unittest.TestCase):
+    """The vertical scroll: keeps the selection visible without ever letting
+    it leave the band, glides rather than snaps, and (the client's own
+    words) walking DOWN repeatedly must eventually surface every game."""
+
+    COUNTS = (1, 2, 6, 7, 9, 10, 11, 12, 20)
+
+    def test_no_scroll_needed_when_everything_fits(self) -> None:
+        for count in (1, 2, 3, 6, 7, 9):
+            for index in range(count):
+                with self.subTest(count=count, index=index):
+                    self.assertEqual(grid.target_scroll(index, count), 0.0)
+
+    def test_selection_always_stays_within_the_visible_band(self) -> None:
+        for count in self.COUNTS:
+            rows = grid.visible_rows(count)
+            for index in range(count):
+                with self.subTest(count=count, index=index):
+                    target = grid.target_scroll(index, count)
+                    row = index // grid.COLUMNS
+                    self.assertGreaterEqual(row + 1e-9, target)
+                    self.assertLessEqual(row, target + rows - 1 + 1e-9)
+
+    def test_scroll_never_exceeds_its_bounds(self) -> None:
+        for count in self.COUNTS:
+            maximum = grid.max_scroll_rows(count)
+            for index in range(count):
+                with self.subTest(count=count, index=index):
+                    target = grid.target_scroll(index, count)
+                    self.assertGreaterEqual(target, 0.0)
+                    self.assertLessEqual(target, maximum)
+
+    def test_every_index_reachable_by_pressing_down_repeatedly(self) -> None:
+        """The client's request, almost verbatim: 'if I just keep clicking
+        down down, it will scroll down and find games there'."""
+        view = view_for(ViewMode.GRID)
+        for count in (1, 2, 7, 9, 10, 12, 20):
+            with self.subTest(count=count):
+                index = 0
+                seen = {index}
+                for _ in range(count * 4):
+                    index = view.navigate(index, count, Direction.DOWN)
+                    seen.add(index)
+                self.assertEqual(seen, set(range(count)))
+
+    def test_the_selection_stays_visible_throughout_a_down_walk(self) -> None:
+        """Not just reachable eventually -- comfortably in view at every
+        single step of the walk, not only once it settles."""
+        view = view_for(ViewMode.GRID)
+        for count in (10, 12, 20):
+            with self.subTest(count=count):
+                index = 0
+                rows = grid.visible_rows(count)
+                for _ in range(count):
+                    index = view.navigate(index, count, Direction.DOWN)
+                    target = grid.target_scroll(index, count)
+                    row = index // grid.COLUMNS
+                    self.assertGreaterEqual(row + 1e-9, target)
+                    self.assertLessEqual(row, target + rows - 1 + 1e-9)
+
+    def test_glide_linear_eases_towards_the_target_without_overshoot(self) -> None:
+        """The same frame-delta-driven approach as the horizontal modes'
+        glide -- consistent motion, monotonic, never overshoots."""
+        value = 0.0
+        target = 3.0
+        for _ in range(200):
+            previous = value
+            value = GallerySession._glide_linear(value, target, 16)
+            self.assertGreaterEqual(value, previous - 1e-9)
+            self.assertLessEqual(value, target + 1e-9)
+        self.assertAlmostEqual(value, target, places=2)
+
+
+class GridRenderingTests(HeadlessCase):
+    """Item 4, for the scrolling board: rendering must stay correct at any
+    catalogue size, not just the seven games currently shipped -- every
+    card on screen, and never more than three rows of it visible at once.
+    """
+
+    COUNTS = (1, 2, 3, 6, 7, 9, 10, 12, 20)
 
     @staticmethod
     def _content_rect() -> pygame.Rect:
@@ -279,59 +404,52 @@ class GridPartialPageCenteringTests(unittest.TestCase):
             SCREEN_HEIGHT - grid.CARD_TOP - grid.CARD_BOTTOM_MARGIN,
         )
 
-    @staticmethod
-    def _bbox(rects: list[pygame.Rect]) -> pygame.Rect:
-        return rects[0].unionall(rects[1:]) if len(rects) > 1 else rects[0].copy()
+    def test_every_visible_card_stays_on_screen_for_several_catalogue_sizes(self) -> None:
+        """Only the rows within the current visible band are meant to be
+        on-screen -- a row scrolled out of view is *supposed* to land off
+        the 800x600 canvas; that is what scrolling means. So this checks
+        containment for the visible band only, not the whole catalogue.
+        """
+        surface_rect = pygame.Rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT)
+        for count in self.COUNTS:
+            manifest = synthetic_manifest(count)
+            states = {
+                game.id: GameState(game.id, GameStatus.COMING_SOON, "")
+                for game in manifest
+            }
+            for index in (0, count - 1):
+                with self.subTest(count=count, selected=index):
+                    scroll = grid.target_scroll(index, count)
+                    built = GalleryFrame.build(
+                        manifest,
+                        states,
+                        selected_index=index,
+                        view_mode=ViewMode.GRID,
+                        time_ms=900,
+                        scroll=float(index),
+                        grid_scroll=scroll,
+                    )
+                    self.assertEqual(self.renderer.render(built).get_size(), SCREEN_SIZE)
+                    rows_shown = grid.visible_rows(count)
+                    first_visible = int(scroll)
+                    for row in range(first_visible, first_visible + rows_shown):
+                        for column in range(grid.row_columns(count, row)):
+                            rect = GridView.slot_rect(row, column, count, scroll)
+                            self.assertTrue(surface_rect.contains(rect), rect)
 
-    def test_a_full_page_renders_exactly_as_before(self) -> None:
-        """A full page must be pixel-for-pixel what the old unconditional
-        card_rect produced -- the centring offset for it must floor to zero,
-        not merely look close."""
-        for slot in range(grid.PAGE_SIZE):
-            with self.subTest(slot=slot):
-                self.assertEqual(
-                    GridView.page_card_rect(slot, grid.PAGE_SIZE),
-                    GridView.card_rect(slot),
-                )
-
-    def test_partial_pages_are_centred_on_both_axes(self) -> None:
+    def test_at_most_three_rows_are_visible_at_rest(self) -> None:
         content = self._content_rect()
-        for count_on_page in range(1, grid.PAGE_SIZE):
-            with self.subTest(count_on_page=count_on_page):
-                rects = [
-                    GridView.page_card_rect(slot, count_on_page)
-                    for slot in range(count_on_page)
-                ]
-                bbox = self._bbox(rects)
-                self.assertAlmostEqual(bbox.centerx, content.centerx, delta=self.TOLERANCE)
-                self.assertAlmostEqual(bbox.centery, content.centery, delta=self.TOLERANCE)
-                surface_rect = pygame.Rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT)
-                for rect in rects:
-                    self.assertTrue(surface_rect.contains(rect), rect)
+        for count in self.COUNTS:
+            for index in (0, count // 2, count - 1):
+                with self.subTest(count=count, index=index):
+                    scroll = grid.target_scroll(index, count)
+                    visible_rows_seen = 0
+                    for row in range(grid.rows_needed(count)):
+                        rect = GridView.slot_rect(row, 0, count, scroll)
+                        if rect.clip(content).height > 0:
+                            visible_rows_seen += 1
+                    self.assertLessEqual(visible_rows_seen, grid.MAX_VISIBLE_ROWS)
 
-    def test_a_full_row_is_untouched_while_a_short_row_is_not(self) -> None:
-        """4 cards: row 0 is a full row of 3 (unchanged), row 1 is a single
-        stray card (centred), and it must be centred *under the full row*
-        rather than at the content area's own centre coincidentally."""
-        rects = [GridView.page_card_rect(slot, 4) for slot in range(4)]
-        row0, row1 = rects[:3], rects[3:]
-        self.assertEqual(row0, [GridView.card_rect(slot) for slot in range(3)])
-        row0_bbox = self._bbox(row0)
-        row1_bbox = self._bbox(row1)
-        self.assertAlmostEqual(row0_bbox.centerx, row1_bbox.centerx, delta=self.TOLERANCE)
-
-    def test_a_short_final_row_is_centred_under_a_full_row(self) -> None:
-        """5 cards: row 0 is a full row of 3, row 1 is a short row of 2 --
-        row 1 must be centred under row 0 rather than hugging the left
-        margin under it."""
-        rects = [GridView.page_card_rect(slot, 5) for slot in range(5)]
-        row0, row1 = rects[:3], rects[3:]
-        row0_bbox = self._bbox(row0)
-        row1_bbox = self._bbox(row1)
-        self.assertAlmostEqual(row0_bbox.centerx, row1_bbox.centerx, delta=self.TOLERANCE)
-        self.assertGreater(row1.__len__(), 0)
-        # The short row must not simply repeat the full row's left edge.
-        self.assertGreater(row1[0].left, row0[0].left)
 
 
 class LinearNavigationTests(unittest.TestCase):

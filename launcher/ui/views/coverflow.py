@@ -255,10 +255,36 @@ class CoverFlowView(GalleryView):
             width += grow
             height += grow
 
+        # Only the front card (never an angled depth card -- see the module
+        # docstring) can be animating, and only when it is genuinely the
+        # selection attract has settled on, not merely a neighbour whose
+        # continuous glide distance happens to round to the same depth slot
+        # mid-transition. The discrete preview frame -- not the raw
+        # milliseconds -- is what joins the cache key below, so the cached
+        # composite is rebuilt only on the handful of frame changes the
+        # animation actually has, never every render call.
+        is_hero = depth == 0 and index == frame.selected_index
+        preview_frame_index = (
+            ctx.preview_frame_index(card.entry, frame.preview.time_ms)
+            if is_hero and frame.preview is not None
+            else None
+        )
+        preview_time_ms = frame.preview.time_ms if preview_frame_index is not None else None
+
         slot = 0 if depth == 0 else (depth if near_left else -depth)
         cover = ctx.cache.get(
-            ("cf", card.entry.id, card.status, (width, height), slot, depth == 0),
-            lambda: self._build_cover(ctx, frame, card, (width, height), depth, near_left),
+            (
+                "cf",
+                card.entry.id,
+                card.status,
+                (width, height),
+                slot,
+                depth == 0,
+                preview_frame_index,
+            ),
+            lambda: self._build_cover(
+                ctx, frame, card, (width, height), depth, near_left, preview_time_ms
+            ),
         )
 
         # Set explicitly on every blit: both surfaces are cached and shared
@@ -271,7 +297,15 @@ class CoverFlowView(GalleryView):
         surface.blit(cover, rect.topleft)
 
         mirror = ctx.cache.get(
-            ("cf-mirror", card.entry.id, card.status, (width, height), slot, depth == 0),
+            (
+                "cf-mirror",
+                card.entry.id,
+                card.status,
+                (width, height),
+                slot,
+                depth == 0,
+                preview_frame_index,
+            ),
             lambda: reflect(cover, REFLECTION_HEIGHT, fade=150),
         )
         mirror.set_alpha(opacity)
@@ -294,6 +328,7 @@ class CoverFlowView(GalleryView):
         size: tuple[int, int],
         depth: int,
         near_left: bool,
+        preview_time_ms: int | None = None,
     ) -> pygame.Surface:
         """Render one flat cover, then skew it into the wall's perspective."""
         flat = pygame.Surface(size, pygame.SRCALPHA)
@@ -308,6 +343,7 @@ class CoverFlowView(GalleryView):
             show_badge=depth == 0,
             badge_scale=1,
             pixel=3 if depth == 0 else 2,
+            preview_time_ms=preview_time_ms,
         )
         if depth == 0:
             return flat

@@ -10,12 +10,14 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..manifest import GameEntry
 from ..paths import BRANDING_LOGO
 from ..status import GameStatus, Notice
 from ..viewmodes import ViewMode
 from . import SCREEN_WIDTH
 from .art import render_card_art
 from .effects import corner_ticks, glow_frame, outline, panel, pulse
+from .preview import PreviewLibrary
 from .pygame_runtime import pygame
 from .surfaces import SurfaceCache
 from .theme import (
@@ -62,6 +64,7 @@ class RenderContext:
     fonts: FontBook = field(default_factory=FontBook)
     cache: SurfaceCache = field(default_factory=SurfaceCache)
     logo_path: Path = BRANDING_LOGO
+    previews: PreviewLibrary = field(default_factory=PreviewLibrary)
     _logo: pygame.Surface | None = field(default=None, init=False, repr=False)
     _logo_failed: bool = field(default=False, init=False, repr=False)
 
@@ -103,6 +106,42 @@ class RenderContext:
         key = ("art", card.entry.id, size, pixel, round(dim, 2))
         return self.cache.get(
             key, lambda: render_card_art(card.entry.art, size, pixel=pixel, dim=dim)
+        )
+
+    def preview_frame_index(self, entry: GameEntry, time_ms: int) -> int | None:
+        """Which decoded preview frame of *entry* plays at *time_ms*.
+
+        Returns ``None`` when *entry* has no usable preview (missing,
+        malformed, unreadable or over any of the hard caps -- see
+        :mod:`launcher.previews`/:mod:`launcher.ui.preview`), which is the
+        caller's signal to fall back to procedural card art. The decode
+        itself happens at most once per game per session: see
+        :class:`~launcher.ui.preview.PreviewLibrary`.
+        """
+        animation = self.previews.get(entry)
+        if animation is None:
+            return None
+        return animation.frame_index(time_ms)
+
+    def preview_surface(
+        self, entry: GameEntry, frame_index: int, size: tuple[int, int]
+    ) -> pygame.Surface:
+        """Return the cached preview frame *frame_index* of *entry* at *size*.
+
+        Callers must have already confirmed *entry* has a preview via
+        :meth:`preview_frame_index` returning something other than ``None`` --
+        this is not itself a fallback path. Scaling with nearest-neighbour
+        (plain :func:`pygame.transform.scale`, the same call
+        :func:`~launcher.ui.art.render_card_art` uses) is what keeps a
+        pixel-art preview crisp instead of smoothed, and the result is cached
+        by ``(game, frame, size)`` so attract mode -- which plays the same
+        handful of frames on a loop -- never rescales the same frame twice.
+        """
+        animation = self.previews.get(entry)
+        assert animation is not None, "caller must check preview_frame_index first"
+        key = ("preview", entry.id, frame_index, size)
+        return self.cache.get(
+            key, lambda: pygame.transform.scale(animation.frames[frame_index], size)
         )
 
 
@@ -277,11 +316,23 @@ def card_cover(
     show_badge: bool = True,
     badge_scale: int = 1,
     pixel: int = 3,
+    preview_time_ms: int | None = None,
 ) -> None:
     """Draw one game cover: art, frame, title and badge.
 
     Shared by all three views so a card always looks like the same object no
     matter which composition it appears in.
+
+    Args:
+        preview_time_ms: When given, attract mode is playing *card*'s preview
+            animation and this is that animation's own clock (milliseconds
+            since it settled on this card -- see
+            :class:`~launcher.attract.AttractSnapshot`). Only the art area
+            changes: the frame, badge and title below are drawn exactly as
+            they always are. A card with no usable preview (see
+            :meth:`RenderContext.preview_frame_index`) silently falls back to
+            its ordinary procedural art even while this is set, so a bad or
+            missing preview never blanks a card attract has settled on.
     """
     status_color = STATUS_COLORS[card.status]
     frame_color = (
@@ -295,7 +346,17 @@ def card_cover(
         rect.left + 4, rect.top + 4, rect.width - 8, rect.height - 8 - title_band
     )
     if art_rect.height > 8:
-        surface.blit(ctx.art(card, art_rect.size, pixel=pixel), art_rect.topleft)
+        preview_index = (
+            ctx.preview_frame_index(card.entry, preview_time_ms)
+            if preview_time_ms is not None
+            else None
+        )
+        art_surface = (
+            ctx.preview_surface(card.entry, preview_index, art_rect.size)
+            if preview_index is not None
+            else ctx.art(card, art_rect.size, pixel=pixel)
+        )
+        surface.blit(art_surface, art_rect.topleft)
         pygame.draw.rect(surface, shade(PALETTE["ink"], 1.4), art_rect, width=1)
 
     if show_title:

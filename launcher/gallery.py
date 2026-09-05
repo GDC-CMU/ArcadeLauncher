@@ -14,9 +14,12 @@ a callable.  :class:`GallerySession` instances satisfy the supervisor's
 from __future__ import annotations
 
 import logging
+import random
 import warnings
 from collections.abc import Callable
+from pathlib import Path
 
+from .attract import AttractConfig, AttractController, AttractPhase
 from .controls import BUTTON_EXIT, Command, command_for_button
 from .input_state import Direction, NavigationController, RepeatPolicy
 from .manifest import GameEntry, Manifest
@@ -25,9 +28,11 @@ from .status import GameState, GameStatus
 from .supervisor import SessionState, UiAction, UiOutcome
 from .sync import SyncService
 from .ui import SCREEN_SIZE
+from .ui.components import RenderContext
+from .ui.preview import PreviewLibrary
 from .ui.pygame_runtime import pygame
 from .ui.scene import Renderer
-from .ui.viewmodel import GalleryFrame, Toast
+from .ui.viewmodel import GalleryFrame, PreviewPlayback, Toast
 from .ui.views.grid import target_scroll as grid_target_scroll
 from .viewmodes import ViewMode
 
@@ -121,6 +126,16 @@ class GallerySession:
             flag is only read *between* sessions, so an idle cabinet -- which
             never generates a QUIT of its own -- would run forever and have to
             be reset at the wall. Defaults to "never stop".
+        cache_root: Managed cache root a game's checkout is resolved inside,
+            for attract mode's preview animations (see
+            :mod:`launcher.ui.preview`). Defaults to the launcher's own
+            default cache root; a session started with ``--cache`` should
+            pass that same override through here so attract mode looks in
+            the same place the supervisor actually launches games from.
+        attract_rng: Source of randomness for attract mode's view-mode and
+            target-game choices. Defaults to a fresh, unseeded
+            :class:`random.Random`; a test passes a seeded one for a
+            deterministic sequence.
     """
 
     def __init__(
@@ -130,18 +145,25 @@ class GallerySession:
         states: dict[str, GameState],
         sync: SyncService | None = None,
         should_stop: Callable[[], bool] | None = None,
+        cache_root: Path | None = None,
+        attract_rng: random.Random | None = None,
     ) -> None:
         self.manifest = manifest
         self.settings = settings
         self.states = states
         self.sync = sync
-        self.renderer = Renderer()
+        self.renderer = Renderer(RenderContext(previews=PreviewLibrary(cache_root)))
         self.navigation = NavigationController.from_policy(
             RepeatPolicy(
                 initial_delay_ms=settings.nav_initial_delay_ms,
                 repeat_ms=settings.nav_repeat_ms,
             ),
             deadzone=settings.axis_deadzone,
+        )
+        self._attract = AttractController(
+            AttractConfig(idle_delay_ms=settings.attract_idle_ms),
+            rng=attract_rng,
+            navigate=self._attract_navigate,
         )
         self._joysticks: dict[int, pygame.joystick.Joystick] = {}
         self._should_stop = should_stop if should_stop is not None else _never
@@ -208,6 +230,7 @@ class GallerySession:
         pygame.mouse.set_visible(False)  # criterion G5: nothing is mouse-driven
 
         self.navigation.reset()
+        self._attract.reset()
         self._joysticks.clear()
         # Disarmed by default -- see the attribute docstring in __init__.
         self._disarmed_exit_keys = {
@@ -429,6 +452,11 @@ class GallerySession:
         #: below and :meth:`_settle_launch`. ``deadline_ms`` bounds that wait
         #: against ``elapsed_ms`` -- see :data:`_LAUNCH_REFRESH_TIMEOUT_MS`.
         pending_launch: tuple[str, int, int] | None = None
+        #: The selection and view mode a visitor actually left the gallery
+        #: on, captured the instant attract mode triggers and restored the
+        #: instant any input cancels it -- ``None`` whenever attract is not
+        #: (and was not, this frame) running. See the attract handling below.
+        attract_saved: tuple[int, ViewMode] | None = None
 
         if self.sync is not None and self.settings.sync_on_start:
             self.sync.request_all(self.manifest.launchable)
@@ -455,6 +483,43 @@ class GallerySession:
                     pending_launch = None
                     toast = refusal
 
+            # Attract mode: advance the idle timer, or -- once triggered --
+            # the demo's own state machine. It only ever proposes a view mode
+            # and a target index (``snapshot``), fed through exactly the
+            # scroll/glide calls below a visitor's own stick press would
+            # drive -- see the module docstring on :mod:`launcher.attract`.
+            snapshot = self._attract.tick(delta_ms, len(self.manifest), index)
+            preview: PreviewPlayback | None = None
+            if snapshot is None:
+                if attract_saved is not None:
+                    # Attract ended on its own rather than via input -- only
+                    # reachable if the catalogue became empty mid-session.
+                    # Restore the visitor's own selection rather than
+                    # stranding it on whatever attract last showed.
+                    index, mode = attract_saved
+                    attract_saved = None
+            else:
+                if attract_saved is None:
+                    attract_saved = (index, mode)
+                previous_index = index
+                index, mode = snapshot.index, snapshot.view_mode
+                if index != previous_index:
+                    focus_ms = 0
+                if snapshot.phase is AttractPhase.SETTLED:
+                    preview = PreviewPlayback(time_ms=snapshot.phase_elapsed_ms)
+
+            #: Set the instant any input dismisses attract mode this frame --
+            #: by a direct KEYDOWN/JOYBUTTONDOWN below, or by a genuine
+            #: navigation step (including stick motion past the deadzone,
+            #: which never raises either of those) after the event loop.
+            #: Every command this frame's events would otherwise have
+            #: produced (a launch, an exit, a view or direction change) is
+            #: discarded instead of applied, so the very input that wakes
+            #: the gallery back up is spent purely on that and never doubles
+            #: as a second, separate command -- in particular, never as an
+            #: EXIT.
+            attract_cancelled = False
+
             for event in self._pump():
                 command = self._command_for(event)
                 if event.type == pygame.QUIT:
@@ -479,7 +544,23 @@ class GallerySession:
                     self._disarmed_exit_buttons.discard(pair)
                     self._observed_down_exit_buttons.discard(pair)
 
+                if event.type in (pygame.KEYDOWN, pygame.JOYBUTTONDOWN):
+                    # Every key/button press resets the idle clock -- not
+                    # only while attract is already running -- so a visitor
+                    # steadily pressing buttons during ordinary browsing
+                    # never drifts into attract mid-session; see
+                    # :meth:`~launcher.attract.AttractController.notice_input`.
+                    if self._attract.notice_input():
+                        if attract_saved is not None:
+                            index, mode = attract_saved
+                            attract_saved = None
+                        preview = None
+                        attract_cancelled = True
+                        continue
+
                 if command is None:
+                    continue
+                if attract_cancelled:
                     continue
                 if command is Command.EXIT:
                     # Direct event evidence that this source is down right
@@ -530,6 +611,22 @@ class GallerySession:
 
             steps = self.navigation.poll(elapsed_ms)
             if steps:
+                # Stick movement past the deadzone (or a held direction key's
+                # repeat) is genuine input too -- the cabinet's own joystick
+                # navigates entirely through axis motion, which never raises
+                # a KEYDOWN/JOYBUTTONDOWN for the check above to see. This is
+                # what keeps a drifting stick -- which never clears the
+                # deadzone and so never produces a step -- from suppressing
+                # attract forever, while a real push resets the idle clock
+                # and, if attract had already triggered, dismisses it exactly
+                # like any other input: consumed as a wake-up, not applied.
+                if self._attract.notice_input():
+                    if attract_saved is not None:
+                        index, mode = attract_saved
+                        attract_saved = None
+                    preview = None
+                    attract_cancelled = True
+            if steps and not attract_cancelled:
                 view = self.renderer.view(mode)
                 for direction in steps:
                     index = view.navigate(index, len(self.manifest), direction)
@@ -554,6 +651,7 @@ class GallerySession:
                 focus_ms=focus_ms,
                 notice=notice,
                 toast=toast,
+                preview=preview,
             )
             self.renderer.draw(screen, frame)
             pygame.display.flip()
@@ -578,6 +676,17 @@ class GallerySession:
         if event.type == pygame.JOYBUTTONDOWN:
             return command_for_button(event.button)
         return None
+
+    def _attract_navigate(
+        self, mode: ViewMode, index: int, count: int, direction: Direction
+    ) -> int:
+        """Advance one attract-mode step, via the real view's own navigation.
+
+        The seam :class:`~launcher.attract.AttractController` calls instead
+        of ever inventing its own stepping rule -- see the module docstring
+        on :mod:`launcher.attract`.
+        """
+        return self.renderer.view(mode).navigate(index, count, direction)
 
     def _exit_is_suppressed(self, event: pygame.event.Event) -> bool:
         """Whether an EXIT command must be ignored -- see item 1.

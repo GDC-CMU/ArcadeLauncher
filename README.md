@@ -54,6 +54,8 @@ main.py                    arcade entrypoint: parse args, wire everything, exit 
 │   ├── sync.py            background updates on a worker thread
 │   ├── controls.py        the arcade button map (b=0 … p1=5 … Start=9)
 │   ├── input_state.py     axis deadzone, debounce, auto-repeat
+│   ├── attract.py         the idle-triggered attract-mode state machine
+│   ├── previews.py        attract preview manifest schema + path containment
 │   └── supervisor.py      the outer loop: run UI → launch child → run UI → …
 │
 ├── launcher/gallery.py    the Pygame session (the UI half of the supervisor loop)
@@ -62,6 +64,7 @@ main.py                    arcade entrypoint: parse args, wire everything, exit 
 │   ├── theme.py           palette, fonts, spacing tokens
 │   ├── surfaces.py        an LRU cache so nothing is redrawn needlessly
 │   ├── art.py             procedural cover art, seeded per game
+│   ├── preview.py         decodes + caches a game's attract preview frames
 │   ├── effects.py         glows, gradients, reflections
 │   ├── viewmodel.py       GalleryFrame — an immutable description of one frame
 │   ├── components.py      shared widgets: header, status badges, banner, toast
@@ -139,6 +142,25 @@ dismiss and no dialog to get stuck in.
 There is no on-screen legend for any of this — the tables above are the
 documentation. A visitor only ever needs three buttons and the stick, and a
 permanent reminder of that on the screen read as clutter more than it helped.
+
+## Attract mode
+
+Leave the cabinet alone for a minute (`attract_idle_ms`, default `60000`) and
+the gallery starts demoing itself: it picks a random view mode, glides
+between games the same way a visitor's own stick press would, settles on one,
+and plays that game's own short looping preview animation inside its card —
+then picks a different view mode and repeats. It never launches a game, never
+syncs, and never touches the network.
+
+**Any input ends it instantly** and puts the gallery back exactly where the
+visitor left it — same game selected, same view mode — because the press that
+wakes the screen back up is spent purely on that: it is never also treated as
+a launch, a view change, or (importantly) an exit, so dismissing attract with
+`P1` does not also quit the gallery.
+
+The preview animation is supplied by the game, not invented by the launcher:
+see [What a game must provide](#what-a-game-must-provide). A game with no
+preview keeps showing its ordinary procedural card art, attract or not.
 
 ## Setup
 
@@ -447,9 +469,9 @@ $env:ARCADE_LAUNCHER_VIEW='cover-flow'; python main.py   # PowerShell
 ```
 
 The same file also holds `fullscreen`, `frame_rate`, `sync_on_start`,
-`nav_initial_delay_ms`, `nav_repeat_ms`, `axis_deadzone` and `network_timeout_s`.
-An invalid value is reported and replaced with the default rather than crashing
-the cabinet.
+`nav_initial_delay_ms`, `nav_repeat_ms`, `axis_deadzone`, `network_timeout_s`
+and `attract_idle_ms`. An invalid value is reported and replaced with the
+default rather than crashing the cabinet.
 
 ## Adding a game
 
@@ -516,6 +538,37 @@ To be launchable from this gallery, a game must:
 
 No import of the launcher, no shared globals, no subclassing. Games stay
 standalone programs — `StreetFighter` runs from this gallery **unmodified**.
+
+Optionally, a game may also ship an **attract preview**: a short, pre-rendered
+looping animation the gallery plays inside its card during attract mode (see
+[Attract mode](#attract-mode)). It lives at a fixed location in the game's own
+checkout:
+
+```
+assets/preview/manifest.json
+assets/preview/frame_000.png
+assets/preview/frame_001.png
+...
+```
+
+```json
+{
+  "version": 1,
+  "fps": 8,
+  "frames": ["frame_000.png", "frame_001.png", "frame_002.png"]
+}
+```
+
+- Entirely optional — a game without `assets/preview/` is not an error, and
+  a coming-soon game (which has no checkout at all) never has one.
+- Author frames small, at the card's aspect ratio (roughly 160×120–200×150)
+  and keep the loop short (1–3 seconds). `fps` must be an integer, 1–30.
+- The launcher never trusts this: every frame path is proven to stay inside
+  `assets/preview/` in that game's own checkout (the same containment rule
+  applied to `entrypoint`), and hard caps bound frame count, per-frame pixel
+  dimensions and total decoded bytes. Anything missing, malformed, unreadable
+  or over a cap is a single logged warning and a silent fallback to the
+  game's ordinary procedural card art — never a crash, never a blank card.
 
 ## Troubleshooting
 

@@ -7,5 +7,6 @@
   "nav_initial_delay_ms": 380,
   "nav_repeat_ms": 140,
   "axis_deadzone": 0.5,
-  "network_timeout_s": 8
+  "network_timeout_s": 8,
+  "attract_idle_ms": 60000
 }

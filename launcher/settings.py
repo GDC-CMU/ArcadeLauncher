@@ -32,6 +32,7 @@ ENV_DEFAULT_VIEW = "ARCADE_LAUNCHER_VIEW"
 ENV_FULLSCREEN = "ARCADE_LAUNCHER_FULLSCREEN"
 ENV_FRAME_RATE = "ARCADE_LAUNCHER_FPS"
 ENV_SYNC_ON_START = "ARCADE_LAUNCHER_SYNC"
+ENV_ATTRACT_IDLE_MS = "ARCADE_LAUNCHER_ATTRACT_IDLE_MS"
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +59,14 @@ class Settings:
             stall rather than an instant, honest ``CACHED_OFFLINE``. See
             ``launcher.cache._DEFAULT_GIT_TIMEOUT_S`` for the fair-day
             reasoning behind the default.
+        attract_idle_ms: How long the gallery must see *zero* genuine input
+            (buttons, keys, or stick movement past ``axis_deadzone``) before
+            it drops into attract mode -- see :mod:`launcher.attract`. This
+            governs the gallery screen, not a game's own attract mode: the
+            club's games use a fixed 15 seconds for theirs, but the gallery
+            is a lower-stakes screen a visitor is more likely to be reading
+            (a description, a status badge) without touching the stick, so
+            a minute gives them room to do that before the demo takes over.
     """
 
     default_view: ViewMode = ViewMode.CAROUSEL
@@ -68,6 +77,7 @@ class Settings:
     nav_repeat_ms: int = 140
     axis_deadzone: float = 0.5
     network_timeout_s: int = 8
+    attract_idle_ms: int = 60_000
 
 
 #: Built-in fallbacks used when ``config/launcher.json`` is absent.
@@ -161,6 +171,14 @@ def _apply_document(settings: Settings, document: Mapping[str, Any], source: str
             low=5,
             high=600,
         )
+    if "attract_idle_ms" in document:
+        updates["attract_idle_ms"] = _as_int(
+            document["attract_idle_ms"],
+            source=source,
+            key="attract_idle_ms",
+            low=1_000,
+            high=1_800_000,
+        )
     return replace(settings, **updates)
 
 
@@ -174,6 +192,8 @@ def _apply_environment(settings: Settings, env: Mapping[str, str]) -> Settings:
         document["frame_rate"] = env[ENV_FRAME_RATE]
     if env.get(ENV_SYNC_ON_START):
         document["sync_on_start"] = env[ENV_SYNC_ON_START]
+    if env.get(ENV_ATTRACT_IDLE_MS):
+        document["attract_idle_ms"] = env[ENV_ATTRACT_IDLE_MS]
     if not document:
         return settings
     return _apply_document(settings, document, source="environment")

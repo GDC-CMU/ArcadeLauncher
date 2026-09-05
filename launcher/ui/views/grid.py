@@ -277,6 +277,11 @@ class GridView(GalleryView):
                 selected = index == frame.selected_index
                 if selected:
                     rect = rect.inflate(grow * 2, grow * 2)
+                preview_time_ms = (
+                    frame.preview.time_ms
+                    if frame.preview is not None and selected
+                    else None
+                )
                 card_cover(
                     surface,
                     ctx,
@@ -287,6 +292,7 @@ class GridView(GalleryView):
                     title_scale=2,
                     badge_scale=1,
                     pixel=3,
+                    preview_time_ms=preview_time_ms,
                 )
 
         if scrolling:

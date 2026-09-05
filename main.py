@@ -146,7 +146,12 @@ def main(argv: list[str] | None = None) -> int:
         shutdown = threading.Event()
         with SyncService(cache, online=online) as sync:
             session = gallery_session(
-                manifest, settings, states, sync, should_stop=shutdown.is_set
+                manifest,
+                settings,
+                states,
+                sync,
+                should_stop=shutdown.is_set,
+                cache_root=cache_root,
             )
             supervisor = Supervisor(
                 manifest,

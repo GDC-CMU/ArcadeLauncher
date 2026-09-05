@@ -162,12 +162,14 @@ class LayeringTests(unittest.TestCase):
     """Criterion C1/I5: pure logic must stay free of Pygame."""
 
     PURE_MODULES = (
+        "attract.py",
         "cache.py",
         "controls.py",
         "errors.py",
         "input_state.py",
         "manifest.py",
         "paths.py",
+        "previews.py",
         "settings.py",
         "status.py",
         "supervisor.py",

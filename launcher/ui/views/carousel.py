@@ -152,6 +152,9 @@ class CarouselView(GalleryView):
                     show_title=False,
                     show_badge=False,
                     pixel=3,
+                    preview_time_ms=(
+                        frame.preview.time_ms if frame.preview is not None else None
+                    ),
                 )
                 continue
 

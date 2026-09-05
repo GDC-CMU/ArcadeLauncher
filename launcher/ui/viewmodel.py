@@ -14,7 +14,7 @@ from ..manifest import GameEntry, Manifest
 from ..status import GameState, GameStatus, Notice
 from ..viewmodes import ViewMode
 
-__all__ = ["Card", "Toast", "GalleryFrame"]
+__all__ = ["Card", "Toast", "PreviewPlayback", "GalleryFrame"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +68,19 @@ class Toast:
 
 
 @dataclass(frozen=True, slots=True)
+class PreviewPlayback:
+    """Which card is playing its attract-mode preview animation, and since when.
+
+    ``time_ms`` is the animation's own clock -- milliseconds since attract
+    settled on this card, restarting at zero every time a new game settles
+    (see :class:`~launcher.attract.AttractSnapshot`) -- not the gallery's
+    overall ``time_ms``, so the loop always starts from its first frame.
+    """
+
+    time_ms: int
+
+
+@dataclass(frozen=True, slots=True)
 class GalleryFrame:
     """Everything a view needs for exactly one frame.
 
@@ -86,6 +99,11 @@ class GalleryFrame:
             focus-in animation.
         notice: Optional banner from the supervisor.
         toast: Optional transient feedback.
+        preview: Set while attract mode has settled on the selected card and
+            is playing its preview animation inside it -- ``None`` the rest
+            of the time (scrolling, no attract, or a normal, visitor-driven
+            selection). Always describes :attr:`selected_index`'s card: there
+            is exactly one card attract can be settled on at a time.
     """
 
     cards: tuple[Card, ...]
@@ -97,6 +115,7 @@ class GalleryFrame:
     focus_ms: int = 0
     notice: Notice | None = None
     toast: Toast | None = None
+    preview: PreviewPlayback | None = None
 
     def __post_init__(self) -> None:
         if not self.cards:

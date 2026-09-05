@@ -20,9 +20,10 @@ The fan is symmetric for *any* game count -- see :meth:`CoverFlowView.
 visible_slots`. An even count has one card sitting exactly opposite the
 selection, equidistant either way around the wrap; naively resolving that tie
 always the same direction is what used to draw three cards on one side and
-two on the other for a six-game catalogue. That card is simply left out of
-the window at rest instead, and slides into view on its own once scrolling
-carries it within range.
+two on the other for a six-game catalogue. That card fades to exactly zero
+opacity at rest rather than being assigned an arbitrary side, and fades back
+in smoothly as scrolling carries it into range -- a hard cutoff there used to
+mean a card snapped to full brightness the instant it crossed the boundary.
 """
 
 from __future__ import annotations
@@ -41,7 +42,16 @@ from ..components import (
     draw_status_badge,
     draw_toast,
 )
-from ..effects import ease_out_cubic, horizon_glow, lerp_stops, pulse, reflect, wrapped_distance
+from ..effects import (
+    ease_out_cubic,
+    edge_alpha,
+    edge_window,
+    horizon_glow,
+    lerp_stops,
+    pulse,
+    reflect,
+    wrapped_distance,
+)
 from ..pygame_runtime import pygame
 from ..theme import PALETTE, STATUS_COLORS, mix, shade
 from ..viewmodel import Card, GalleryFrame
@@ -75,6 +85,7 @@ OFFSET_STOPS: tuple[tuple[float, float], ...] = (
     (2.0, DEPTH_BASE + DEPTH_STEP),
     (3.0, DEPTH_BASE + DEPTH_STEP * 2),
 )
+FADE_WIDTH = 1.0
 
 
 def perspective(source: pygame.Surface, near_left: bool) -> pygame.Surface:
@@ -125,18 +136,18 @@ class CoverFlowView(GalleryView):
 
     # ------------------------------------------------------------------
     @staticmethod
-    def visible_slots(scroll: float, count: int) -> list[tuple[int, float]]:
-        """Every ``(index, signed distance)`` the wall draws, farthest first.
+    def visible_slots(scroll: float, count: int) -> list[tuple[int, float, float]]:
+        """Every ``(index, signed distance, opacity)`` the wall draws, farthest
+        first.
 
-        Symmetric by construction: the cap is the largest N for which N
-        cards fit on *each* side without ever reaching the exact opposite of
-        the selection, so an even count's ambiguous, exactly-half-way card
-        is never arbitrarily assigned a side -- it simply is not part of the
-        window at rest. Because the cap is compared against the
-        *continuous* scroll-relative distance rather than the integer
-        selection, that card slides into the window on its own the moment
-        scrolling carries it within range, instead of only ever resolving
-        discretely once it becomes the new selection.
+        Symmetric by construction: opacity comes from
+        :func:`~launcher.ui.effects.edge_window` / ``edge_alpha``, which
+        reaches exactly zero at half the game count -- so an even count's
+        ambiguous, exactly-half-way card is never arbitrarily assigned a
+        side, it is simply invisible at rest -- while a card within
+        :data:`MAX_DEPTH` fades in smoothly as scrolling carries it into
+        range, rather than snapping to full brightness the instant a hard
+        cutoff used to be crossed.
 
         Also what keeps a card from ever being drawn twice: every index is
         visited exactly once, so there is no direction-and-distance pair
@@ -144,13 +155,14 @@ class CoverFlowView(GalleryView):
         """
         if count <= 0:
             return []
-        cap = min(MAX_DEPTH, (count - 1) // 2)
-        slots: list[tuple[int, float]] = []
+        fade_start, window_limit = edge_window(float(MAX_DEPTH), count, FADE_WIDTH)
+        slots: list[tuple[int, float, float]] = []
         for index in range(count):
             distance = wrapped_distance(index, scroll, count)
-            if abs(distance) > cap + 1e-9:
+            magnitude = abs(distance)
+            if magnitude >= window_limit:
                 continue
-            slots.append((index, distance))
+            slots.append((index, distance, edge_alpha(magnitude, fade_start, window_limit)))
         slots.sort(key=lambda item: -abs(item[1]))
         return slots
 
@@ -196,7 +208,7 @@ class CoverFlowView(GalleryView):
         self, surface: pygame.Surface, ctx: RenderContext, frame: GalleryFrame
     ) -> None:
         # Farthest first so nearer cards paint on top.
-        for index, distance in self.visible_slots(frame.scroll, frame.count):
+        for index, distance, alpha in self.visible_slots(frame.scroll, frame.count):
             magnitude = abs(distance)
             slot_depth = min(MAX_DEPTH, round(magnitude))
             offset = lerp_stops(magnitude, OFFSET_STOPS)
@@ -210,6 +222,7 @@ class CoverFlowView(GalleryView):
                 depth=slot_depth,
                 near_left=distance > 0,
                 centre_x=centre_x,
+                alpha=alpha,
             )
 
     def _blit_cover(
@@ -222,6 +235,7 @@ class CoverFlowView(GalleryView):
         depth: int,
         near_left: bool,
         centre_x: int,
+        alpha: float,
     ) -> None:
         card = frame.cards[index]
         shrink = DEPTH_SHRINK ** max(0, depth - 1) * (1.0 if depth == 0 else 0.9)
@@ -238,6 +252,11 @@ class CoverFlowView(GalleryView):
             lambda: self._build_cover(ctx, frame, card, (width, height), depth, near_left),
         )
 
+        # Set explicitly on every blit: both surfaces are cached and shared
+        # across frames, so nothing about a previous draw's alpha may be
+        # assumed to still hold here.
+        opacity = max(0, min(255, round(alpha * 255)))
+        cover.set_alpha(opacity)
         rect = cover.get_rect()
         rect.midbottom = (centre_x, HORIZON_Y - 2)
         surface.blit(cover, rect.topleft)
@@ -246,6 +265,7 @@ class CoverFlowView(GalleryView):
             ("cf-mirror", card.entry.id, card.status, (width, height), slot, depth == 0),
             lambda: reflect(cover, REFLECTION_HEIGHT, fade=150),
         )
+        mirror.set_alpha(opacity)
         surface.blit(mirror, (rect.left, HORIZON_Y + 2))
 
         if depth == 0:

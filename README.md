@@ -365,6 +365,30 @@ banner the supervisor raises when a game exits badly.
 
 ![Status badge reference](docs/screenshots/status-badges.png)
 
+## Changing the look
+
+Restyling the launcher does not mean hunting through three view files — the
+shared pieces each live in exactly one place:
+
+- **Colours** — the single named palette is `PALETTE` in
+  `launcher/ui/theme.py`. Every view, badge and effect pulls its colours from
+  there by name (`PALETTE["cmu_red"]`, `PALETTE["electric_cyan"]`, ...), so
+  changing an entry once changes it everywhere it is used, consistently
+  across all three modes.
+- **Backdrop** — the dark gradient field behind every view is
+  `Renderer.background()` in `launcher/ui/scene.py`. It is built once per
+  screen size and cached, so a change there is still cheap.
+- **Header / marquee** — the logo, wordmark, subtitle and mode chip are
+  `draw_gallery_header()` in `launcher/ui/components.py`. It is deliberately
+  the *only* place that draws the header: all three views call it as-is
+  rather than composing their own, which is what keeps it identical no
+  matter which view is on screen. Change it there and every view picks it up.
+- **Card art** — the procedural, seeded-per-game cover art is
+  `render_card_art()` in `launcher/ui/art.py`, driven entirely by each game's
+  `art` block in `data/games.json` (`motif`, three `palette` names, and a
+  `seed`). Adding a new look means adding a motif function there and picking
+  it by name in the manifest — no image asset to draw or ship.
+
 ## Changing the default gallery mode
 
 The mode shown when the cabinet boots is `default_view` in

@@ -14,6 +14,7 @@ from launcher.manifest import CardArt, GameEntry, Manifest, Runtime, load_manife
 from launcher.status import GameState, GameStatus, Notice
 from launcher.ui import SCREEN_HEIGHT, SCREEN_SIZE, SCREEN_WIDTH
 from launcher.ui.components import HEADER_HEIGHT, HEADER_RECT
+from launcher.ui.effects import edge_alpha, edge_window
 from launcher.ui.pygame_runtime import pygame
 from launcher.ui.scene import Renderer
 from launcher.ui.surfaces import SurfaceCache
@@ -21,6 +22,7 @@ from launcher.ui.theme import PALETTE, FontBook, PixelFont, mix, shade
 from launcher.ui.viewmodel import GalleryFrame, Toast
 from launcher.ui.views import VIEWS, view_for
 from launcher.ui.views import carousel, coverflow, grid
+from launcher.ui.views.carousel import NEIGHBOUR_CEILING, CarouselView
 from launcher.ui.views.coverflow import MAX_DEPTH, CoverFlowView
 from launcher.ui.views.grid import GridView
 from launcher.viewmodes import ViewMode
@@ -477,29 +479,33 @@ class SharedHeaderTests(HeadlessCase):
 
 
 class CoverFlowSymmetryTests(unittest.TestCase):
-    """Item A: the fan must be symmetric for any game count.
+    """Item A: the fan must be symmetric for any game count, and item A of the
+    follow-up session: entering/exiting cards must fade, not pop.
 
     ``wrapped_distance`` has an ambiguous case at exactly half the catalogue
     around from the selection -- the diametrically opposite card is equally
     close either way -- and resolving that tie to a fixed side is what used
-    to draw three cards on the left and two on the right for six games. The
-    fix caps the window so that tie is never entered; these tests exercise
-    every count named in the brief, at rest and mid-scroll.
+    to draw three cards on the left and two on the right for six games.
+    ``edge_window``/``edge_alpha`` fix both problems at once: opacity reaches
+    exactly zero at that boundary (so the tie stays invisible at rest,
+    keeping the fan symmetric) while ramping smoothly as a card's distance
+    changes (so nothing snaps to full brightness the instant an old hard
+    cutoff was crossed).
     """
 
     COUNTS = (1, 2, 3, 4, 5, 6, 7, 12, 20)
 
-    def test_left_and_right_counts_are_always_equal(self) -> None:
+    def test_left_and_right_counts_are_equal_at_rest(self) -> None:
+        """The steady-state fan -- what the visitor actually looks at -- must
+        never be lopsided, for any catalogue size."""
         for count in self.COUNTS:
-            for scroll in (0.0, 0.35, 1.0, count - 0.5):
-                if scroll < 0 or scroll >= count:
-                    continue
-                with self.subTest(count=count, scroll=scroll):
-                    slots = CoverFlowView.visible_slots(scroll, count)
-                    left = sum(1 for _, distance in slots if distance < -1e-9)
-                    right = sum(1 for _, distance in slots if distance > 1e-9)
+            for selected in range(count):
+                with self.subTest(count=count, selected=selected):
+                    slots = CoverFlowView.visible_slots(float(selected), count)
+                    left = sum(1 for _, distance, _ in slots if distance < -1e-9)
+                    right = sum(1 for _, distance, _ in slots if distance > 1e-9)
                     self.assertEqual(
-                        left, right, f"lopsided fan at count={count} scroll={scroll}"
+                        left, right, f"lopsided fan at count={count} selected={selected}"
                     )
 
     def test_no_index_is_ever_drawn_twice(self) -> None:
@@ -509,7 +515,7 @@ class CoverFlowSymmetryTests(unittest.TestCase):
                     continue
                 with self.subTest(count=count, scroll=scroll):
                     slots = CoverFlowView.visible_slots(scroll, count)
-                    indices = [index for index, _ in slots]
+                    indices = [index for index, _, _ in slots]
                     self.assertEqual(
                         len(indices), len(set(indices)), "a card rendered twice"
                     )
@@ -519,24 +525,97 @@ class CoverFlowSymmetryTests(unittest.TestCase):
         for count in (1, 2):
             with self.subTest(count=count):
                 slots = CoverFlowView.visible_slots(0.0, count)
-                self.assertEqual([index for index, _ in slots], [0])
+                self.assertEqual([index for index, _, _ in slots], [0])
 
     def test_the_window_never_reaches_the_ambiguous_exact_half(self) -> None:
-        """The cap must always stay strictly under count/2 for even counts."""
-        for count in (2, 4, 6, 8, 20):
-            with self.subTest(count=count):
-                slots = CoverFlowView.visible_slots(0.0, count)
-                for _, distance in slots:
-                    self.assertLess(abs(distance), count / 2)
+        """The window must always stay strictly under count/2, at rest and
+        mid-scroll, and nothing rendered may carry a non-zero opacity there."""
+        for count in self.COUNTS:
+            for scroll in (0.0, 0.35, 1.0, count - 0.5):
+                if scroll < 0 or scroll >= count:
+                    continue
+                with self.subTest(count=count, scroll=scroll):
+                    for _, distance, alpha in CoverFlowView.visible_slots(scroll, count):
+                        self.assertLess(abs(distance), count / 2)
+                        self.assertGreater(alpha, 0.0)
 
-    def test_odd_counts_show_every_other_card(self) -> None:
+    def test_odd_counts_show_every_card(self) -> None:
         """Odd counts have no exact-half tie, so nothing needs hiding."""
         for count in (3, 5, 7):
             with self.subTest(count=count):
                 slots = CoverFlowView.visible_slots(0.0, count)
-                # +1 for the hero itself (distance 0), included in every slot list.
-                expected = 2 * min(MAX_DEPTH, (count - 1) // 2) + 1
-                self.assertEqual(len(slots), expected)
+                self.assertEqual(len(slots), count)
+
+    def test_alpha_reaches_exactly_zero_at_the_symmetric_boundary(self) -> None:
+        fade_start, window_limit = edge_window(float(MAX_DEPTH), 6, 1.0)
+        self.assertEqual(edge_alpha(window_limit, fade_start, window_limit), 0.0)
+        self.assertGreater(window_limit, fade_start)
+
+    def test_alpha_is_genuinely_mid_fade_not_snapping(self) -> None:
+        """Regression for the pop: an entering/exiting card's opacity must be
+        strictly between 0 and full, not one or the other."""
+        count = 6
+        fade_start, window_limit = edge_window(float(MAX_DEPTH), count, 1.0)
+        target_distance = (fade_start + window_limit) / 2.0
+        scroll = 3.0 - target_distance
+        slots = {index: alpha for index, _, alpha in CoverFlowView.visible_slots(scroll, count)}
+        self.assertIn(3, slots)
+        self.assertGreater(slots[3], 0.0)
+        self.assertLess(slots[3], 1.0)
+
+
+class CarouselFadeTests(unittest.TestCase):
+    """The same pop/symmetry fix, applied to Carousel's neighbours."""
+
+    COUNTS = (1, 2, 3, 4, 5, 6, 7, 12, 20)
+
+    def test_left_and_right_counts_are_equal_at_rest(self) -> None:
+        for count in self.COUNTS:
+            for selected in range(count):
+                with self.subTest(count=count, selected=selected):
+                    slots = CarouselView.visible_slots(float(selected), count)
+                    left = sum(1 for _, distance, _ in slots if distance < -1e-9)
+                    right = sum(1 for _, distance, _ in slots if distance > 1e-9)
+                    self.assertEqual(
+                        left, right, f"lopsided stage at count={count} selected={selected}"
+                    )
+
+    def test_no_index_is_ever_drawn_twice(self) -> None:
+        for count in self.COUNTS:
+            for scroll in (0.0, 0.35, 1.0, count - 0.5):
+                if scroll < 0 or scroll >= count:
+                    continue
+                with self.subTest(count=count, scroll=scroll):
+                    slots = CarouselView.visible_slots(scroll, count)
+                    indices = [index for index, _, _ in slots]
+                    self.assertEqual(
+                        len(indices), len(set(indices)), "a card rendered twice"
+                    )
+
+    def test_the_window_never_reaches_the_ambiguous_exact_half(self) -> None:
+        for count in self.COUNTS:
+            for scroll in (0.0, 0.35, 1.0, count - 0.5):
+                if scroll < 0 or scroll >= count:
+                    continue
+                with self.subTest(count=count, scroll=scroll):
+                    for _, distance, alpha in CarouselView.visible_slots(scroll, count):
+                        self.assertLess(abs(distance), count / 2)
+                        self.assertGreater(alpha, 0.0)
+
+    def test_alpha_reaches_exactly_zero_at_the_symmetric_boundary(self) -> None:
+        fade_start, window_limit = edge_window(NEIGHBOUR_CEILING, 4, 1.0)
+        self.assertEqual(edge_alpha(window_limit, fade_start, window_limit), 0.0)
+        self.assertGreater(window_limit, fade_start)
+
+    def test_alpha_is_genuinely_mid_fade_not_snapping(self) -> None:
+        count = 6
+        fade_start, window_limit = edge_window(NEIGHBOUR_CEILING, count, 1.0)
+        target_distance = (fade_start + window_limit) / 2.0
+        scroll = 3.0 - target_distance
+        slots = {index: alpha for index, _, alpha in CarouselView.visible_slots(scroll, count)}
+        self.assertIn(3, slots)
+        self.assertGreater(slots[3], 0.0)
+        self.assertLess(slots[3], 1.0)
 
 
 if __name__ == "__main__":  # pragma: no cover

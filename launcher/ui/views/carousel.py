@@ -22,10 +22,18 @@ from ..components import (
     draw_status_badge,
     draw_toast,
 )
-from ..effects import ease_out_cubic, lerp_stops, panel, pulse, wrapped_distance
+from ..effects import (
+    ease_out_cubic,
+    edge_alpha,
+    edge_window,
+    lerp_stops,
+    panel,
+    pulse,
+    wrapped_distance,
+)
 from ..pygame_runtime import pygame
 from ..theme import PALETTE, STATUS_COLORS, mix, shade
-from ..viewmodel import GalleryFrame
+from ..viewmodel import Card, GalleryFrame
 from .base import GalleryView, register
 
 __all__ = ["CarouselView"]
@@ -46,7 +54,11 @@ HERO_SIZE = (224, 248)
 #: different every frame.
 OFFSET_STOPS: tuple[tuple[float, float], ...] = ((0.0, 0.0), (1.0, 206.0), (2.0, 352.0))
 VERTICAL_STOPS: tuple[tuple[float, float], ...] = ((0.0, 0.0), (1.0, 6.0), (2.0, 6.0))
-MAX_DRAW_DISTANCE = 2.0
+#: How many neighbours the design shows fully opaque on each side; see
+#: :func:`~launcher.ui.effects.edge_window` for how a card beyond it fades in
+#: rather than popping into view.
+NEIGHBOUR_CEILING = 2.0
+FADE_WIDTH = 1.0
 #: Discrete size steps, indexed by ``round(distance)`` clamped to the last one.
 SCALE_BY_BUCKET: tuple[float, ...] = (1.0, 0.74, 0.50)
 
@@ -71,6 +83,31 @@ class CarouselView(GalleryView):
             draw_toast(surface, ctx, (SCREEN_WIDTH // 2, STAGE.centery), frame.toast, frame.time_ms)
 
     # ------------------------------------------------------------------
+    @staticmethod
+    def visible_slots(scroll: float, count: int) -> list[tuple[int, float, float]]:
+        """Every ``(index, signed distance, opacity)`` the stage draws.
+
+        Farthest first. A card's opacity comes from
+        :func:`~launcher.ui.effects.edge_window` / ``edge_alpha``: fully
+        opaque out to :data:`NEIGHBOUR_CEILING`, then fading to exactly zero
+        at the symmetric boundary -- never at or beyond half the game count
+        -- so a card entering or leaving the stage glides in and out instead
+        of popping, without reintroducing the lopsided fan an unconditional
+        widening would.
+        """
+        if count <= 0:
+            return []
+        fade_start, window_limit = edge_window(NEIGHBOUR_CEILING, count, FADE_WIDTH)
+        slots: list[tuple[int, float, float]] = []
+        for index in range(count):
+            distance = wrapped_distance(index, scroll, count)
+            magnitude = abs(distance)
+            if magnitude >= window_limit:
+                continue
+            slots.append((index, distance, edge_alpha(magnitude, fade_start, window_limit)))
+        slots.sort(key=lambda item: -abs(item[1]))
+        return slots
+
     def _draw_stage(
         self, surface: pygame.Surface, ctx: RenderContext, frame: GalleryFrame
     ) -> None:
@@ -80,53 +117,93 @@ class CarouselView(GalleryView):
         # Every card's position, scale and layering come from its continuous
         # distance to the smoothed scroll position -- not the integer index --
         # so a card slides between slots instead of teleporting the moment the
-        # selection changes. Farthest first, so the near cards paint on top.
-        visible = []
-        for index in range(frame.count):
-            distance = wrapped_distance(index, frame.scroll, frame.count)
-            if abs(distance) > MAX_DRAW_DISTANCE:
-                continue
-            visible.append((abs(distance), distance, index))
-        visible.sort(key=lambda item: -item[0])
-
-        for magnitude, distance, index in visible:
+        # selection changes.
+        for index, distance, alpha in self.visible_slots(frame.scroll, frame.count):
+            magnitude = abs(distance)
             is_hero = index == frame.selected_index
             bucket = min(len(SCALE_BY_BUCKET) - 1, round(magnitude))
             offset = lerp_stops(magnitude, OFFSET_STOPS)
             vertical = lerp_stops(magnitude, VERTICAL_STOPS)
             scale = SCALE_BY_BUCKET[bucket]
-            size = (
-                int(HERO_SIZE[0] * scale) + (grow if is_hero else 0),
-                int(HERO_SIZE[1] * scale) + (grow if is_hero else 0),
-            )
             sign = 0.0 if distance == 0 else (1.0 if distance > 0 else -1.0)
-            rect = pygame.Rect(0, 0, *size)
-            rect.center = (
+            centre = (
                 int(centre_x + sign * offset),
                 int(STAGE.centery + vertical),
             )
-            card_cover(
-                surface,
-                ctx,
-                rect,
-                frame.cards[index],
-                selected=is_hero,
-                time_ms=frame.time_ms,
-                show_title=not is_hero and bucket == 1,
-                title_scale=1,
-                show_badge=not is_hero and bucket == 1,
-                badge_scale=1,
-                pixel=3 if is_hero else 2,
-            )
+
+            if is_hero:
+                # The selection is always fully opaque and drawn live (its
+                # glow genuinely pulses), so it is never routed through the
+                # cached, alpha-faded neighbour path below.
+                size = (int(HERO_SIZE[0] * scale) + grow, int(HERO_SIZE[1] * scale) + grow)
+                rect = pygame.Rect(0, 0, *size)
+                rect.center = centre
+                card_cover(
+                    surface,
+                    ctx,
+                    rect,
+                    frame.cards[index],
+                    selected=True,
+                    time_ms=frame.time_ms,
+                    show_title=False,
+                    show_badge=False,
+                    pixel=3,
+                )
+                continue
+
+            size = (int(HERO_SIZE[0] * scale), int(HERO_SIZE[1] * scale))
+            show_title = bucket == 1
+            neighbour = self._neighbour_surface(ctx, frame.cards[index], size, show_title)
+            # Set explicitly on every blit: this surface is cached and reused
+            # across frames and cards, so nothing about a previous draw's
+            # alpha may be assumed to still hold.
+            neighbour.set_alpha(max(0, min(255, round(alpha * 255))))
+            rect = neighbour.get_rect()
+            rect.center = centre
+            surface.blit(neighbour, rect.topleft)
 
         # Edge fades so the neighbours bleed out rather than being cut off.
         for side in (0, 1):
             fade = pygame.Surface((90, STAGE.height), pygame.SRCALPHA)
             for column in range(90):
-                alpha = int(232 * ((90 - column) / 90) ** 1.6)
+                fade_alpha = int(232 * ((90 - column) / 90) ** 1.6)
                 x = column if side == 0 else 89 - column
-                pygame.draw.line(fade, (*PALETTE["void"], alpha), (x, 0), (x, STAGE.height))
+                pygame.draw.line(fade, (*PALETTE["void"], fade_alpha), (x, 0), (x, STAGE.height))
             surface.blit(fade, (0 if side == 0 else SCREEN_WIDTH - 90, STAGE.top))
+
+    @staticmethod
+    def _neighbour_surface(
+        ctx: RenderContext, card: Card, size: tuple[int, int], show_title: bool
+    ) -> pygame.Surface:
+        """Return the cached, unselected card composite for a neighbour slot.
+
+        Cached by content only -- never by the continuously-varying alpha --
+        so fading a card in or out costs one cheap ``set_alpha()`` call
+        immediately before the blit, not a rebuild. The animated glow/pulse a
+        selected card gets is irrelevant here (neighbours are never
+        selected), so baking ``time_ms=0`` in costs nothing visually and lets
+        the same surface serve every frame.
+        """
+        key = ("carousel-neighbour", card.entry.id, card.status, size, show_title)
+
+        def build() -> pygame.Surface:
+            flat = pygame.Surface(size, pygame.SRCALPHA)
+            card_cover(
+                flat,
+                ctx,
+                flat.get_rect(),
+                card,
+                selected=False,
+                time_ms=0,
+                show_title=show_title,
+                title_scale=1,
+                show_badge=show_title,
+                badge_scale=1,
+                pixel=2,
+            )
+            return flat
+
+        return ctx.cache.get(key, build)
 
     def _draw_info(
         self, surface: pygame.Surface, ctx: RenderContext, frame: GalleryFrame

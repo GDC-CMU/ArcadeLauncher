@@ -18,6 +18,8 @@ __all__ = [
     "pulse",
     "lerp_stops",
     "wrapped_distance",
+    "edge_window",
+    "edge_alpha",
     "panel",
     "outline",
     "glow_frame",
@@ -84,6 +86,48 @@ def wrapped_distance(index: int, position: float, count: int) -> float:
         return 0.0
     raw = index - position
     return ((raw + count / 2) % count) - count / 2
+
+
+def edge_window(ceiling: float, count: int, width: float = 1.0) -> tuple[float, float]:
+    """Return ``(fade_start, window_limit)`` for a symmetric, count-safe fade.
+
+    A card is fully opaque up to *fade_start* and fades linearly to zero
+    opacity at *window_limit*, so a card sliding into the edge of the visible
+    window fades in smoothly instead of snapping to full brightness the
+    instant it crosses a hard cutoff -- and a card can never be rendered at
+    or beyond half the game count, which is what keeps an even-numbered
+    catalogue's diametrically-opposite card from being arbitrarily drawn on
+    one side (see :func:`wrapped_distance`).
+
+    Two regimes, chosen by whether an *even* count's antipodal card can
+    actually reach the design ceiling:
+
+    * **A real tie is reachable** (the count is even and half of it is at or
+      below *ceiling*): the fade happens in the last *width* of distance
+      approaching that exact halfway point instead of the ceiling, so the
+      antipodal card is reliably invisible at rest rather than arbitrarily
+      assigned a side. An odd count never has this problem -- its antipodal
+      position sits at a half-integer no card ever exactly reaches at rest
+      -- so it is never routed through this branch.
+    * **Otherwise**: everything up to the ceiling stays exactly as opaque as
+      it always was; only the sliver *beyond* it fades in, capped so it can
+      never reach half the count either.
+    """
+    safe_limit = count / 2.0
+    if count % 2 == 0 and safe_limit <= ceiling:
+        return max(0.0, safe_limit - width), safe_limit
+    window_limit = min(ceiling + width, safe_limit)
+    return min(ceiling, window_limit), window_limit
+
+
+def edge_alpha(magnitude: float, fade_start: float, window_limit: float) -> float:
+    """Opacity for a card at *magnitude* distance, given an :func:`edge_window`."""
+    if magnitude <= fade_start:
+        return 1.0
+    if magnitude >= window_limit:
+        return 0.0
+    span = window_limit - fade_start
+    return 0.0 if span <= 0 else (window_limit - magnitude) / span
 
 
 # ---------------------------------------------------------------------------

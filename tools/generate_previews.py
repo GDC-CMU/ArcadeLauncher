@@ -95,10 +95,15 @@ BADGE_SHEET_FILENAME = "status-badges.png"
 PINNED_TIME_MS = 1_400
 
 #: Which card each shot selects, chosen to show a different game every time.
+#: Carousel and Cover Flow both put the selected card's detail text front and
+#: centre, so those two point at the manifest's two launchable games -- the
+#: only way a screenshot can show the "updated <commit>" detail that answers
+#: "am I running the latest build?" at the cabinet. Grid never renders that
+#: detail text at all, so its selection is free to be any other card.
 SELECTION: dict[ViewMode, int] = {
-    ViewMode.GRID: 0,
-    ViewMode.CAROUSEL: 2,
-    ViewMode.COVER_FLOW: 3,
+    ViewMode.GRID: 2,
+    ViewMode.CAROUSEL: 0,
+    ViewMode.COVER_FLOW: 1,
 }
 
 
@@ -114,12 +119,19 @@ def cabinet_states(manifest: Manifest) -> dict[str, GameState]:
     shows an impossible screen is worse than documentation that shows a plain
     one, so the screenshots now render exactly what the launcher renders.
 
+    The detail text mirrors what ``RepositoryCache.sync`` actually reports for
+    a healthy checkout: the short commit id it just fetched, not a vaguer
+    "synced just now" that a real sync() call can no longer produce -- every
+    call re-fetches, so the commit is always known. Showing it here is the
+    same answer a visitor gets on the cabinet to "am I running the latest
+    build?" without needing a terminal.
+
     The full badge vocabulary is documented instead by
     :func:`render_badge_sheet`, which is clearly labelled as a reference.
     """
     states = {
         entry.id: (
-            GameState(entry.id, GameStatus.READY, "Synced just now")
+            GameState(entry.id, GameStatus.READY, "updated a1b2c3d")
             if entry.launchable
             else GameState(
                 entry.id, GameStatus.COMING_SOON, entry.note or "In development"

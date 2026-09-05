@@ -247,6 +247,123 @@ class LoopTests(unittest.TestCase):
         self.assertIs(outcome.view_mode, ViewMode.COVER_FLOW)
 
 
+class ScriptedSync:
+    """A test double standing in for :class:`~launcher.sync.SyncService`.
+
+    Real :class:`SyncService` runs git on a background thread, which would
+    make the pre-launch-refresh tests below racy against wall-clock time.
+    This double keeps the same two-method surface the gallery actually uses
+    (``request``/``drain``) but publishes a scripted result the very next
+    time :meth:`drain` is called, so the test controls exactly how many
+    frames the "refresh" takes without touching a thread or the filesystem.
+    """
+
+    def __init__(self, results: dict[str, GameState]) -> None:
+        self._results = results
+        self.requested: list[str] = []
+        self._queued: list[GameState] = []
+
+    def request_all(self, entries) -> int:  # pragma: no cover - unused here
+        return len(list(entries))
+
+    def request(self, entry) -> None:
+        self.requested.append(entry.id)
+        self._queued.append(self._results[entry.id])
+
+    def drain(self) -> list[GameState]:
+        published, self._queued = self._queued, []
+        return published
+
+
+def _states_for(status_for_launchable: GameStatus) -> dict[str, GameState]:
+    return {
+        game.id: GameState(
+            game.id,
+            status_for_launchable if game.launchable else GameStatus.COMING_SOON,
+            "",
+        )
+        for game in MANIFEST
+    }
+
+
+class PreLaunchRefreshTests(unittest.TestCase):
+    """A launch re-syncs its game immediately before starting it (item 3):
+    even a card that already reads READY may be stale in a long session, so
+    pressing Play confirms the checkout is current -- via the background
+    worker, never a blocking call on this thread -- before the outcome is
+    handed back to the supervisor.
+    """
+
+    def run_session(self, sync, script):
+        settings = Settings(fullscreen=False, frame_rate=60, sync_on_start=False)
+        states = _states_for(GameStatus.READY)
+        game = ScriptedSession(MANIFEST, settings, states, sync, script=script)
+        outcome = game(SessionState())
+        self.addCleanup(pygame.quit)
+        return states, outcome
+
+    def test_launch_waits_for_its_own_refresh_and_uses_the_new_commit(self) -> None:
+        game_id = MANIFEST[0].id
+        sync = ScriptedSync(
+            {game_id: GameState(game_id, GameStatus.READY, "updated def5678")}
+        )
+        states, outcome = self.run_session(
+            sync, script=[[button_event(BUTTON_LAUNCH)], []]
+        )
+        self.assertEqual(sync.requested, [game_id], "the selected game must be re-synced")
+        self.assertIs(outcome.action, UiAction.LAUNCH)
+        self.assertEqual(outcome.game_id, game_id)
+        self.assertIn("def5678", states[game_id].detail)
+
+    def test_launch_still_starts_the_cached_copy_if_the_refresh_fails(self) -> None:
+        """A failed pre-launch fetch must not strand the visitor: a good
+        checkout still launches and still reports CACHED_OFFLINE, exactly as
+        it would if the failure had happened during the background sync."""
+        game_id = MANIFEST[0].id
+        sync = ScriptedSync(
+            {
+                game_id: GameState(
+                    game_id, GameStatus.CACHED_OFFLINE, "network unreachable (cached abc1234)"
+                )
+            }
+        )
+        states, outcome = self.run_session(
+            sync, script=[[button_event(BUTTON_LAUNCH)], []]
+        )
+        self.assertIs(outcome.action, UiAction.LAUNCH)
+        self.assertEqual(outcome.game_id, game_id)
+        self.assertIs(states[game_id].status, GameStatus.CACHED_OFFLINE)
+
+    def test_launch_is_refused_if_the_refresh_leaves_nothing_playable(self) -> None:
+        """If the checkout is gone by the time the refresh runs, the visitor
+        stays in the gallery instead of being handed a broken launch."""
+        game_id = MANIFEST[0].id
+        sync = ScriptedSync(
+            {game_id: GameState(game_id, GameStatus.UNAVAILABLE, "checkout corrupted")}
+        )
+        _, outcome = self.run_session(
+            sync,
+            script=[[button_event(BUTTON_LAUNCH)], [], [key_event(pygame.K_ESCAPE)]],
+        )
+        self.assertIs(outcome.action, UiAction.QUIT)
+
+    def test_offline_mode_still_confirms_without_any_network_call(self) -> None:
+        """Offline mode (``sync_on_start`` off / ``--no-sync``) re-verifies the
+        disk before launch through the same path, but the double standing in
+        for it here never talks to git either way -- what matters is that the
+        gallery still routes the confirmation through the worker rather than
+        skipping it."""
+        game_id = MANIFEST[0].id
+        sync = ScriptedSync(
+            {game_id: GameState(game_id, GameStatus.CACHED_OFFLINE, "using cached copy abc1234")}
+        )
+        states, outcome = self.run_session(
+            sync, script=[[button_event(BUTTON_LAUNCH)], []]
+        )
+        self.assertIs(outcome.action, UiAction.LAUNCH)
+        self.assertIs(states[game_id].status, GameStatus.CACHED_OFFLINE)
+
+
 class ExitSettleTests(unittest.TestCase):
     """Regression (item 1): a stale Esc/P1 spanning the session transition
     must not bounce the visitor straight past the gallery.

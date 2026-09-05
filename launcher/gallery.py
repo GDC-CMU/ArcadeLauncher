@@ -19,7 +19,7 @@ from collections.abc import Callable
 
 from .controls import BUTTON_EXIT, Command, command_for_button
 from .input_state import Direction, NavigationController, RepeatPolicy
-from .manifest import Manifest
+from .manifest import GameEntry, Manifest
 from .settings import Settings
 from .status import GameState, GameStatus
 from .supervisor import SessionState, UiAction, UiOutcome
@@ -299,6 +299,10 @@ class GallerySession:
         grid_scroll = grid_target_scroll(index, len(self.manifest))
         focus_ms = 0
         elapsed_ms = 0
+        #: ``(game_id, index)`` while a launch is waiting on its own
+        #: immediately-before-launch refresh; see the LAUNCH handling below
+        #: and :meth:`_settle_launch`.
+        pending_launch: tuple[str, int] | None = None
 
         if self.sync is not None and self.settings.sync_on_start:
             self.sync.request_all(self.manifest.launchable)
@@ -315,6 +319,14 @@ class GallerySession:
             elapsed_ms += delta_ms
             focus_ms += delta_ms
             self._absorb_sync()
+
+            if pending_launch is not None:
+                outcome, refusal = self._settle_launch(pending_launch, mode, elapsed_ms)
+                if outcome is not None:
+                    return outcome
+                if refusal is not None:
+                    pending_launch = None
+                    toast = refusal
 
             for event in self._pump():
                 command = self._command_for(event)
@@ -355,8 +367,20 @@ class GallerySession:
                     entry = self.manifest[index]
                     status = self._status(entry.id)
                     if entry.launchable and status.is_playable:
-                        return self._outcome(UiAction.LAUNCH, mode, index, entry.id)
-                    toast = self._refusal(index, status, elapsed_ms)
+                        if self.sync is not None:
+                            # Even a card that already reads READY may be
+                            # hours stale in a long-running session: confirm
+                            # it is current before the visitor's press
+                            # actually starts anything. This runs on the
+                            # background worker (see cache.sync), so the
+                            # gallery keeps rendering while it happens; the
+                            # card's own badge flips to UPDATING to show it.
+                            pending_launch = (entry.id, index)
+                            self.sync.request(entry)
+                        else:
+                            return self._outcome(UiAction.LAUNCH, mode, index, entry.id)
+                    else:
+                        toast = self._refusal(entry, status, elapsed_ms)
                     notice = None
 
             steps = self.navigation.poll(elapsed_ms)
@@ -468,9 +492,8 @@ class GallerySession:
         state = self.states.get(game_id)
         return state.status if state is not None else GameStatus.PENDING
 
-    def _refusal(self, index: int, status: GameStatus, now_ms: int) -> Toast:
+    def _refusal(self, entry: GameEntry, status: GameStatus, now_ms: int) -> Toast:
         """Explain why a card did not launch. Criterion E6 -- never launches."""
-        entry = self.manifest[index]
         if status is GameStatus.COMING_SOON:
             headline, detail = "COMING SOON", f"{entry.title} is not on the cabinet yet"
         elif status.is_busy:
@@ -479,6 +502,27 @@ class GallerySession:
             headline, detail = "NOT AVAILABLE", f"{entry.title} could not be downloaded"
         _log.info("refused to launch %s (%s)", entry.id, status.value)
         return Toast(headline, detail, started_ms=now_ms, duration_ms=_TOAST_MS)
+
+    def _settle_launch(
+        self, pending: tuple[str, int], mode: ViewMode, now_ms: int
+    ) -> tuple[UiOutcome | None, Toast | None]:
+        """Resolve a launch that is waiting on its own pre-flight refresh.
+
+        Returns ``(outcome, None)`` once the refresh landed on something
+        playable, ``(None, toast)`` once it landed on something that is not,
+        or ``(None, None)`` while the background worker is still on it -- in
+        which case the caller keeps waiting and the card's own ``UPDATING``
+        badge (set by :meth:`~launcher.sync.SyncService.request`) is the only
+        visible sign anything is happening.
+        """
+        game_id, index = pending
+        current = self.states.get(game_id)
+        if current is None or current.status.is_busy:
+            return None, None
+        if current.status.is_playable:
+            return self._outcome(UiAction.LAUNCH, mode, index, game_id), None
+        entry = self.manifest.by_id(game_id)
+        return None, self._refusal(entry, current.status, now_ms)
 
     def _absorb_sync(self) -> None:
         """Fold any finished background sync results into the live state map."""

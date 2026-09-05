@@ -274,15 +274,23 @@ selection — and there is a test pinning that, so it stays true.
 
 Game checkouts live in `.arcade-cache/` (git-ignored, never committed). On
 start-up a background thread refreshes each launchable game while the gallery is
-already interactive — updating never blocks browsing.
+already interactive — updating never blocks browsing. Every refresh actually
+re-fetches: there is no "recently synced, skip it" timestamp, because that is
+exactly what once let a three-commits-stale build run for hours while reading
+`PLAYABLE`. The same refresh runs one more time, forced, the instant a visitor
+presses Play — so even a session left running all day hands out the build
+that exists *right then*, not whatever was current when the gallery opened.
+Both refreshes are backgrounded; neither blocks rendering.
 
-Each card reports exactly what is true of it right now:
+Each card reports exactly what is true of it right now, including the short
+commit id of the build it is showing — the answer to "am I running the
+latest?" without needing a terminal:
 
 | Badge | Meaning |
 | --- | --- |
-| `PLAYABLE` | Cached, verified and current. Press `A` to start it. |
+| `PLAYABLE` | Cached, verified and current. Press `A` to start it. Its detail line reads `updated <commit>`. |
 | `UPDATING` | A background fetch is running. Play is held for the second or two it takes, because git may be mid-write in that checkout. |
-| `CACHED OFFLINE` | The update failed, but a good checkout is already there. Fully playable. |
+| `CACHED OFFLINE` | The update failed, but a good checkout is already there. Fully playable, and its detail line still names the cached commit. |
 | `UNAVAILABLE` | Never successfully downloaded on this cabinet. Not playable. |
 | `COMING SOON` | Curated in the manifest but not released yet. Not playable. |
 | `QUEUED` | Waiting its turn in the sync queue. |
@@ -300,7 +308,9 @@ The rules that follow from this:
 - **Nothing outside the cache is ever executed.** Every entrypoint is resolved
   against its own checkout directory and rejected if it escapes — `..`, absolute
   paths and symlink tricks all fail validation before a process is spawned.
-- **`--no-sync` is a hard promise.** In offline mode `git` is not invoked at all.
+- **`--no-sync` is a hard promise.** In offline mode `git` is not invoked at all,
+  including for the pre-launch refresh — it falls back to verifying whatever is
+  already on disk, same as every other offline check.
 
 ## Screenshots
 

@@ -110,7 +110,7 @@ class SyncService:
     # ------------------------------------------------------------------
     # Queueing
     # ------------------------------------------------------------------
-    def request(self, entry: GameEntry, *, force: bool = False) -> None:
+    def request(self, entry: GameEntry) -> None:
         """Queue *entry* for synchronisation.
 
         Raises:
@@ -122,7 +122,7 @@ class SyncService:
                 f"game '{entry.id}' is coming-soon and must never be synchronised"
             )
         self._results.put(GameState(entry.id, GameStatus.UPDATING, "contacting GitHub"))
-        self._requests.put((entry, force))
+        self._requests.put(entry)
 
     def request_all(self, entries: Iterable[GameEntry]) -> int:
         """Queue every *launchable* entry; coming-soon entries are skipped.
@@ -171,15 +171,15 @@ class SyncService:
             try:
                 if item is _STOP:
                     return
-                entry, force = item  # type: ignore[misc]
-                self._results.put(self._sync_one(entry, force))
+                entry = item  # type: ignore[assignment]
+                self._results.put(self._sync_one(entry))
             finally:
                 self._requests.task_done()
 
-    def _sync_one(self, entry: GameEntry, force: bool) -> GameState:
+    def _sync_one(self, entry: GameEntry) -> GameState:
         try:
             if self._online:
-                return self._cache.sync(entry, force=force)
+                return self._cache.sync(entry)
             return self._cache.verify_only(entry)
         except NotLaunchableError:
             # A coming-soon entry reached the worker: a real bug, not a runtime

@@ -191,6 +191,33 @@ def make_fixture_repo(directory: Path, entrypoint: str = "main.py") -> Path:
     return directory
 
 
+def advance_fixture_repo(directory: Path, entrypoint: str = "main.py") -> str:
+    """Commit a real change onto a repo made by :func:`make_fixture_repo`.
+
+    Used to simulate "a fix landed upstream while the cabinet was running":
+    the returned short commit id is what a fresh ``sync()`` of a checkout
+    cloned *before* this call must end up at.
+    """
+    target = directory / entrypoint
+    target.write_text(
+        target.read_text(encoding="utf-8") + "# advanced\n", encoding="utf-8"
+    )
+
+    def git(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(  # noqa: S603 - fixed argv, no shell
+            ["git", *args],
+            cwd=directory,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+    git("add", "-A")
+    git("commit", "-m", "advance fixture")
+    return git("rev-parse", "--short", "HEAD").stdout.strip()
+
+
 class TempDirCase(unittest.TestCase):
     """Base class providing a scratch directory that is always cleaned up."""
 

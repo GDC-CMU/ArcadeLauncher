@@ -34,14 +34,9 @@ __all__ = [
     "GitRunner",
     "SubprocessGitRunner",
     "RepositoryCache",
-    "DEFAULT_MAX_AGE_S",
 ]
 
 _log = logging.getLogger(__name__)
-
-#: A checkout synced more recently than this is considered fresh and is not
-#: re-fetched, so restarting the launcher at a club fair is instant.
-DEFAULT_MAX_AGE_S = 6 * 60 * 60
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,8 +126,11 @@ class RepositoryCache:
     Args:
         root: Cache root. Defaults to ``.arcade-cache`` beside the launcher.
         runner: Git runner; injected in tests.
-        clock: Monotonic-ish wall clock used for freshness checks.
-        max_age_s: Age above which a checkout is refreshed from its ref.
+        clock: Wall clock used to timestamp the bookkeeping written by
+            :meth:`mark_synced` -- an operational record of when a checkout
+            last succeeded, not a gate on whether to fetch again. See
+            :meth:`sync` for why nothing here trusts a timestamp to decide
+            that.
     """
 
     def __init__(
@@ -140,12 +138,10 @@ class RepositoryCache:
         root: Path | None = None,
         runner: GitRunner | None = None,
         clock: Callable[[], float] = time.time,
-        max_age_s: int = DEFAULT_MAX_AGE_S,
     ) -> None:
         self.root = Path(root) if root is not None else default_cache_root()
         self.runner: GitRunner = runner if runner is not None else SubprocessGitRunner()
         self._clock = clock
-        self._max_age_s = max_age_s
 
     # ------------------------------------------------------------------
     # Locations
@@ -207,16 +203,11 @@ class RepositoryCache:
                 json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
             )
         except OSError as exc:
-            # Bookkeeping is an optimisation: losing it only costs one extra
-            # fetch, so it must never break a launch -- but it is still logged.
+            # Bookkeeping is an optimisation: it only affects what the UI can
+            # report (the last known commit), never whether the next sync
+            # runs, so losing it must never break a launch -- but it is still
+            # logged.
             _log.warning("could not record sync state for %s: %s", entry.id, exc)
-
-    def is_fresh(self, entry: GameEntry) -> bool:
-        """Whether the last successful sync is recent enough to skip the network."""
-        last = self._read_state(entry).get("synced_at")
-        if not isinstance(last, (int, float)):
-            return False
-        return (self._clock() - float(last)) < self._max_age_s
 
     def last_commit(self, entry: GameEntry) -> str:
         """Short commit id recorded at the last successful sync ('' if unknown)."""
@@ -265,8 +256,28 @@ class RepositoryCache:
             )
         return GameState(entry.id, GameStatus.UNAVAILABLE, reason)
 
-    def sync(self, entry: GameEntry, *, force: bool = False) -> GameState:
+    def sync(self, entry: GameEntry) -> GameState:
         """Clone or refresh *entry* and report the resulting state.
+
+        Every call that finds a checkout already on disk re-fetches it: there
+        is no timestamp that decides a build is "fresh enough" to skip the
+        network. *When* to call this is the caller's decision, not this
+        method's -- :class:`~launcher.sync.SyncService` already makes it once
+        per gallery session (via ``request_all``) and once more, immediately,
+        right before a launch is allowed to proceed, both off the render
+        thread. A single shallow ``fetch`` against a checkout that already
+        exists is small and fast, and it runs in the background regardless, so
+        there is nothing here worth trading away.
+
+        A previous revision skipped the fetch for six hours after the last
+        successful sync, on the theory that it kept a restart at a club fair
+        instant. That shaved a cost no visitor could perceive (syncing was
+        already backgrounded) against serving a build that was quietly hours
+        stale, with the gallery reporting it as "up to date" the whole time --
+        a strictly worse trade. The one place that still deliberately avoids
+        the network is offline operation: ``SyncService(online=False)`` (wired
+        up from ``sync_on_start`` / ``--no-sync``) calls :meth:`verify_only`
+        instead of this method and never invokes git at all.
 
         Never raises for expected failures -- offline, bad ref, missing git and
         a missing entrypoint all become a :class:`~launcher.status.GameState`
@@ -284,8 +295,6 @@ class RepositoryCache:
 
         checkout = self.checkout_path(entry)
         if self.has_checkout(entry):
-            if not force and self.is_fresh(entry) and self.has_entrypoint(entry):
-                return self._ready_state(entry, "up to date")
             result = self._refresh(entry, checkout)
         else:
             result = self._clone(entry, checkout)

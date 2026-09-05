@@ -16,6 +16,8 @@ Pygame reports a readable failure instead of dying in an import statement.
 from __future__ import annotations
 
 import argparse
+import faulthandler
+import io
 import logging
 import sys
 import threading
@@ -115,6 +117,23 @@ def report_fatal(error: Exception, settings: Settings | None) -> int:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     configure_logging(args.verbose)
+    # A fatal, unhandled native fault (a segfault or, on Windows, an
+    # unhandled structured exception inside a C extension such as SDL) kills
+    # the interpreter below the level any Python ``try``/``except`` can see --
+    # no traceback, no log line, nothing. That is exactly the failure mode
+    # criterion A's incident showed: the process ended between one log line
+    # and the next with no exception ever reaching Python. faulthandler
+    # cannot prevent a crash like that, but it installs a low-level handler
+    # that prints a traceback of what every thread was doing at the moment
+    # of the fault to this same stderr stream before the process goes down,
+    # which turns "silently vanished" into "here is exactly where it died".
+    # ``sys.stderr`` has no real file descriptor in some test/embedding
+    # setups (a captured ``io.StringIO``, for instance); faulthandler is a
+    # diagnostic nicety there, not a requirement, so that is never fatal.
+    try:
+        faulthandler.enable(file=sys.stderr)
+    except (ValueError, OSError, AttributeError, io.UnsupportedOperation) as exc:
+        _log.debug("faulthandler unavailable on this stream: %s", exc)
     _log.info("GDC Arcade Launcher %s starting", __version__)
 
     settings: Settings | None = None
@@ -166,6 +185,23 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         _log.info("interrupted; returning to the arcade menu")
         return EXIT_OK
+    except BaseException as exc:  # noqa: BLE001 - last resort, see below
+        # Nothing above here should ever let anything reach this: it is
+        # deliberately broader than ``Exception`` so that even a stray
+        # ``SystemExit`` raised by something other than this file's own
+        # documented exit points -- which no narrower handler would catch,
+        # since ``SystemExit`` is not an ``Exception`` subclass -- is logged
+        # before the process ends rather than exiting silently. See the
+        # incident in the project history this guards against: a launcher
+        # that ends between one log line and the next, with no traceback and
+        # no clue which of these it was.
+        _log.critical(
+            "unhandled %s reached the top of main(); exiting instead of "
+            "vanishing silently",
+            type(exc).__name__,
+            exc_info=True,
+        )
+        return EXIT_FAILED
 
 
 if __name__ == "__main__":

@@ -66,7 +66,7 @@ class Settings:
             club's games use a fixed 15 seconds for theirs, but the gallery
             is a lower-stakes screen a visitor is more likely to be reading
             (a description, a status badge) without touching the stick, so
-            a minute gives them room to do that before the demo takes over.
+            it gets a little longer than that.
     """
 
     default_view: ViewMode = ViewMode.CAROUSEL
@@ -77,7 +77,7 @@ class Settings:
     nav_repeat_ms: int = 140
     axis_deadzone: float = 0.5
     network_timeout_s: int = 8
-    attract_idle_ms: int = 60_000
+    attract_idle_ms: int = 30_000
 
 
 #: Built-in fallbacks used when ``config/launcher.json`` is absent.

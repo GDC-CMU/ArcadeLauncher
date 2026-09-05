@@ -110,6 +110,25 @@ class ChildResult:
         return self.returncode == 0
 
 
+def _child_process_group_kwargs() -> dict[str, object]:
+    """``Popen`` kwargs that give a launched game its own process group.
+
+    Mirrors the exact same choice already made for git subprocesses (see
+    ``launcher.cache._run_git``): on Windows, a child spawned without
+    ``CREATE_NEW_PROCESS_GROUP`` shares the console's process group with the
+    launcher, so a Ctrl+C typed at that console is delivered to *both*
+    processes at once; on POSIX, ``start_new_session=True`` is the equivalent
+    isolation. Keeping the game in its own group means a Ctrl+C the operator
+    aims at the launcher cannot also be misread by the game's own SDL/input
+    layer, and the two console-signal domains stay cleanly separated instead
+    of overlapping in whatever way the OS happens to resolve it. ``P1``
+    inside the game remains the documented, and only, way to end it.
+    """
+    if os.name == "nt":
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    return {"start_new_session": True}
+
+
 def build_child_command(entry: GameEntry, checkout: Path) -> list[str]:
     """Build the argument list used to start *entry*.
 
@@ -187,6 +206,7 @@ class ProcessGameRunner:
                         stdout=stream,
                         stderr=subprocess.STDOUT,
                         stdin=subprocess.DEVNULL,
+                        **_child_process_group_kwargs(),
                     )
                 except OSError as exc:
                     raise LaunchError(f"could not start '{game_id}': {exc}") from exc
@@ -195,6 +215,9 @@ class ProcessGameRunner:
                 try:
                     returncode = process.wait()
                 except KeyboardInterrupt:
+                    _log.warning(
+                        "Ctrl+C while waiting for %s; terminating it", game_id
+                    )
                     self.terminate()
                     returncode = process.wait()
                     raise
@@ -326,6 +349,17 @@ class Supervisor:
     def run(self) -> int:
         """Run gallery sessions until the visitor exits.
 
+        Every way this can end logs why, at INFO or louder, before it
+        returns or raises -- see the module docstring's incident: a launcher
+        that ends silently, between one log line and the next, is
+        undiagnosable. That includes the ``while`` loop's own fall-through
+        (reached only once :attr:`_shutdown` is set, itself only ever set by
+        a logged signal handler or a logged ``KeyboardInterrupt`` inside
+        :meth:`_launch`) and a last-resort ``BaseException`` handler for
+        anything -- a stray ``SystemExit``, most plausibly -- that the
+        narrower handlers below it were never going to catch, since neither
+        is an ``Exception`` subclass.
+
         Returns:
             The process exit code: 0 for a normal exit back to the arcade menu.
 
@@ -356,6 +390,16 @@ class Supervisor:
                         Notice("error", "Gallery restarted", str(exc)[:160])
                     )
                     continue
+                except BaseException as exc:  # noqa: BLE001 - see docstring above
+                    _log.critical(
+                        "gallery session raised %s, which is not a subclass "
+                        "of Exception and so is never caught by anything "
+                        "above -- logging it here rather than letting it "
+                        "escape silently",
+                        type(exc).__name__,
+                        exc_info=True,
+                    )
+                    raise
 
                 restarts = 0
                 self.sessions_run += 1
@@ -368,6 +412,10 @@ class Supervisor:
 
                 assert outcome.game_id is not None  # validated above
                 self.state = self.state.with_notice(self._launch(outcome.game_id))
+                _log.info(
+                    "back from %s; reopening the gallery", outcome.game_id
+                )
+            _log.info("shutdown flag set; leaving the supervisor loop")
             return 0
         finally:
             self._restore_handlers()
@@ -422,6 +470,16 @@ class Supervisor:
         except LaunchError as exc:
             return Notice("error", f"Cannot start {entry.title}", str(exc))
         except KeyboardInterrupt:
+            # A genuine Ctrl+C should stop the launcher entirely -- but it
+            # must say so. This used to be silent, which is exactly what
+            # made a real, unrelated silent-exit incident indistinguishable
+            # from an operator's own Ctrl+C after the fact: neither logged
+            # anything, so nothing in the log could tell them apart.
+            _log.warning(
+                "Ctrl+C while %s was running; shutting down the launcher "
+                "instead of returning to the gallery",
+                entry.id,
+            )
             self._shutdown.set()
             return None
 

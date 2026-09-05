@@ -488,7 +488,9 @@ class GallerySession:
             # and a target index (``snapshot``), fed through exactly the
             # scroll/glide calls below a visitor's own stick press would
             # drive -- see the module docstring on :mod:`launcher.attract`.
-            snapshot = self._attract.tick(delta_ms, len(self.manifest), index)
+            snapshot = self._attract.tick(
+                delta_ms, len(self.manifest), index, self._attract_eligible_indices()
+            )
             preview: PreviewPlayback | None = None
             if snapshot is None:
                 if attract_saved is not None:
@@ -687,6 +689,29 @@ class GallerySession:
         on :mod:`launcher.attract`.
         """
         return self.renderer.view(mode).navigate(index, count, direction)
+
+    def _attract_eligible_indices(self) -> tuple[int, ...]:
+        """Manifest indices attract mode may actually settle on.
+
+        A coming-soon card, or a launchable game that has not shipped
+        ``assets/preview/`` yet, has nothing to animate for the whole dwell
+        period -- settling on one would look like the demo had frozen, not
+        like a showcase. Restricted to entries that are launchable,
+        currently reported playable (not still syncing or unavailable), and
+        carry a decoded, usable preview (see
+        :class:`~launcher.ui.preview.PreviewLibrary`, already decode-once
+        cached, so checking this every frame costs a dict lookup).
+        """
+        eligible: list[int] = []
+        for index, entry in enumerate(self.manifest):
+            if not entry.launchable:
+                continue
+            if not self._status(entry.id).is_playable:
+                continue
+            if self.renderer.ctx.previews.get(entry) is None:
+                continue
+            eligible.append(index)
+        return tuple(eligible)
 
     def _exit_is_suppressed(self, event: pygame.event.Event) -> bool:
         """Whether an EXIT command must be ignored -- see item 1.

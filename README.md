@@ -145,18 +145,26 @@ permanent reminder of that on the screen read as clutter more than it helped.
 
 ## Attract mode
 
-Leave the cabinet alone for a minute (`attract_idle_ms`, default `60000`) and
-the gallery starts demoing itself: it picks a random view mode, glides
-between games the same way a visitor's own stick press would, settles on one,
-and plays that game's own short looping preview animation inside its card —
-then picks a different view mode and repeats. It never launches a game, never
-syncs, and never touches the network.
+Leave the cabinet alone for 30 seconds (`attract_idle_ms`, default `30000`)
+and the gallery starts demoing itself: it picks a random view mode, glides
+between games the same way a visitor's own stick press would, settles on
+one, and plays that game's own short looping preview animation inside its
+card — then picks a different view mode and repeats. Only games that are
+launchable, currently playable, and actually ship a preview animation are
+ever chosen as a target — a coming-soon card, or a launchable game with no
+preview yet, would just sit there frozen for the whole dwell period, which
+reads as broken rather than as a showcase. If no game qualifies, attract
+never engages at all; if exactly one does, attract settles on it once and
+stays there rather than cycling view modes with nothing to actually glide
+between. It never launches a game, never syncs, and never touches the
+network.
 
 **Any input ends it instantly** and puts the gallery back exactly where the
 visitor left it — same game selected, same view mode — because the press that
 wakes the screen back up is spent purely on that: it is never also treated as
 a launch, a view change, or (importantly) an exit, so dismissing attract with
-`P1` does not also quit the gallery.
+`P1` does not also quit the gallery. The idle clock re-arms the moment attract
+is dismissed, so another 30 seconds of silence drops back into it.
 
 The preview animation is supplied by the game, not invented by the launcher:
 see [What a game must provide](#what-a-game-must-provide). A game with no
@@ -244,7 +252,7 @@ gallery onto whatever panel is fitted without the layout changing.
 
 ### Cabinet-specific hazards
 
-Four failure modes exist only on the cabinet and never on a development machine,
+Five failure modes exist only on the cabinet and never on a development machine,
 which is exactly what makes them dangerous. All are handled, and each has tests
 that fail if the handling is removed.
 
@@ -291,6 +299,23 @@ Devices are now keyed by SDL instance id and re-adding a known one is a no-op
 that closes the duplicate handle. Navigation was never affected — held
 directions are merged as a set, so a doubled device could not double-step the
 selection — and there is a test pinning that, so it stays true.
+
+**The launcher must never exit without saying why.** A game exiting cleanly and
+the launcher never coming back — with no traceback, no error, nothing after the
+child's own "exited with code 0" line — was reported directly from a cabinet
+console. Every route out of `Supervisor.run()` now logs at INFO or louder before
+it returns or raises, including the loop's own fall-through and a last-resort
+handler for anything that is not even an `Exception` subclass (a stray
+`SystemExit`, most plausibly), so a genuine Ctrl+C, a crashed gallery and a
+silent process death are never indistinguishable in the log again. `main.py`
+also enables Python's `faulthandler` at start-up: it cannot prevent a fatal
+native fault inside a C extension such as SDL, but it prints what every thread
+was doing at the moment of one, which turns "vanished without a trace" into a
+diagnosable stack. A launched game now also runs in its own console process
+group (`CREATE_NEW_PROCESS_GROUP` on Windows, `start_new_session` on POSIX) —
+the same isolation `launcher/cache.py` already gave git subprocesses — so a
+Ctrl+C aimed at the launcher's console and whatever the game's own SDL/input
+layer does with a console signal can never be mistaken for one another.
 
 ## Offline behaviour
 
@@ -588,6 +613,7 @@ assets/preview/frame_001.png
 | Screenshot tests fail right after cloning | Your Pygame/SDL_ttf differs from the one that generated the committed PNGs | Not expected any more — that comparison now skips itself with an explanatory message. If a screenshot test *does* fail it means the UI really did change: run `python -m tools.generate_previews` and commit the result. |
 | Launcher will not close; the menu cannot stop it | A termination signal was caught but the running gallery never saw it | Fixed: the loop checks the shutdown flag every frame and exits in ~50 ms. Never use the reset button for this — the maintainer warns it risks filesystem corruption. |
 | Each joystick logged twice at start-up | SDL announces an already-connected device through both enumeration and `JOYDEVICEADDED` | Fixed: devices are keyed by SDL instance id, so the second announcement is ignored. Navigation was never double-stepping. |
+| Launcher ends after a game exits, with nothing after "exited with code N" in the log | Either a genuine Ctrl+C (now logged as such) or a fatal native fault in a C extension | Every ordinary exit path now logs why. If the log still ends with no explanation at all, that is `faulthandler`'s territory: it prints the state of every thread at the moment of a fatal fault to the same stderr stream, so re-run with the fault visible instead of silent. |
 
 ## Club-fair preflight
 

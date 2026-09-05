@@ -347,5 +347,88 @@ class RealChildProcessTests(SupervisorHarness):
         )
 
 
+class RaisingRunner:
+    """A runner double whose ``run()`` raises instead of returning."""
+
+    def __init__(self, exc: BaseException) -> None:
+        self._exc = exc
+        self.terminated = 0
+
+    def run(self, command, cwd, *, game_id):  # noqa: ANN001 - protocol shape
+        raise self._exc
+
+    def terminate(self) -> None:
+        self.terminated += 1
+
+
+class LoudExitTests(SupervisorHarness):
+    """Every route out of :meth:`Supervisor.run` must log why -- see the
+    silent-exit incident this guards against. None of these assert on a
+    mock in place of the real question: whether the *log stream itself*
+    -- the one artefact an operator actually has after the fact -- carries
+    the explanation.
+    """
+
+    def test_child_exit_logs_the_return_to_the_gallery(self) -> None:
+        """The other half of criterion A's regression: a child exiting
+        cleanly must always bring the gallery back, and that return must
+        itself be logged, not just silently happen to work."""
+        ui = ScriptedUi(
+            UiOutcome(UiAction.LAUNCH, ViewMode.GRID, 0, "streetfighter"),
+            UiOutcome(UiAction.QUIT, ViewMode.GRID, 0),
+        )
+        with self.assertLogs("launcher.supervisor", level="INFO") as captured:
+            result = self.supervise(ui, RecordingRunner(ChildResult(0))).run()
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            len(ui.states), 2, "the gallery must reopen after the child exits"
+        )
+        self.assertTrue(
+            any("reopening the gallery" in line for line in captured.output)
+        )
+
+    def test_a_runner_keyboardinterrupt_is_logged_and_shuts_down_cleanly(self) -> None:
+        """Regression for criterion A: a Ctrl+C while a child is running
+        must stop the launcher (not crash it, not silently vanish) and say
+        so in the log."""
+        ui = ScriptedUi(UiOutcome(UiAction.LAUNCH, ViewMode.GRID, 0, "streetfighter"))
+        runner = RaisingRunner(KeyboardInterrupt())
+        with self.assertLogs("launcher.supervisor", level="INFO") as captured:
+            result = self.supervise(ui, runner).run()
+        self.assertEqual(result, 0)
+        self.assertTrue(any("Ctrl+C" in line for line in captured.output))
+        self.assertTrue(
+            any("shutdown flag set" in line for line in captured.output),
+            "the loop's own fall-through must log too, not just the raise",
+        )
+
+    def test_a_ui_keyboardinterrupt_is_logged(self) -> None:
+        class InterruptingUi:
+            def __call__(self, state: SessionState) -> UiOutcome:
+                raise KeyboardInterrupt
+
+        with self.assertLogs("launcher.supervisor", level="INFO") as captured:
+            result = self.supervise(InterruptingUi()).run()
+        self.assertEqual(result, 0)
+        self.assertTrue(any("interrupted" in line for line in captured.output))
+
+    def test_an_unexpected_baseexception_is_logged_then_reraised(self) -> None:
+        """Not an ``Exception`` subclass -- ``except Exception`` alone would
+        never see this coming, which is exactly what let a real incident
+        vanish without a trace. The last-resort handler must still log it,
+        even though (unlike the crash-recovery path) it re-raises rather
+        than restarting: something this unexpected should not be papered
+        over as an ordinary gallery crash."""
+
+        class ExitingUi:
+            def __call__(self, state: SessionState) -> UiOutcome:
+                raise SystemExit(7)
+
+        with self.assertLogs("launcher.supervisor", level="CRITICAL") as captured:
+            with self.assertRaises(SystemExit):
+                self.supervise(ExitingUi()).run()
+        self.assertTrue(any("SystemExit" in line for line in captured.output))
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

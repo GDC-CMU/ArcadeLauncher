@@ -20,10 +20,16 @@ Pressing DOWN past the last visible row -- or UP past the first -- eases the
 view by exactly enough to keep the selection inside the visible band, the
 same frame-delta-driven glide the horizontal modes use for their selection
 scroll (see ``GallerySession._glide_linear``). This replaced an earlier
-paginated design (fixed pages, page dots); the pages are gone, but the same
-per-row centring that kept a page's short final row from hugging the left
-margin is still here, now applied to the whole catalogue's actual final row
-instead of a page's.
+paginated design (fixed pages, page dots); the pages are gone.
+
+**Rows fill left-to-right, always -- a short final row is left-aligned, not
+centred.** An earlier revision centred a short final row, which was right for
+the paginated design (a lone card on its own page looked marooned) but wrong
+here: it made a card's on-screen column disagree with its actual index --
+with 7 games, index 6 (row 2, column 0) drew in the *middle* column, so
+pressing DOWN from the middle column landed on a different card than the one
+that visually looked like it was there. Column ``n`` on screen is now always
+index ``n`` modulo :data:`COLUMNS`, on every row, with no exceptions.
 """
 
 from __future__ import annotations
@@ -108,20 +114,6 @@ def row_columns(count: int, row: int) -> int:
     return max(0, min(COLUMNS, count - row * COLUMNS))
 
 
-def row_dx(cols_in_row: int) -> int:
-    """Horizontal centring offset for a row holding *cols_in_row* cards.
-
-    A full row of :data:`COLUMNS` already spans the content area up to a
-    rounding remainder of a pixel or two (:data:`CARD_WIDTH` is itself
-    floor-divided), so this floors to zero for a full row -- the common case
-    is a genuine no-op, not a special case. A short final row (fewer than
-    :data:`COLUMNS` cards) is nudged to sit centred under the full rows above
-    it instead of hugging the left margin.
-    """
-    block_width = cols_in_row * CARD_WIDTH + max(0, cols_in_row - 1) * CARD_GAP_X
-    return (CONTENT_WIDTH - block_width) // 2
-
-
 def target_scroll(index: int, count: int) -> float:
     """The row-scroll position that keeps *index* comfortably visible.
 
@@ -141,16 +133,17 @@ def target_scroll(index: int, count: int) -> float:
 
 
 def _down_index(index: int, count: int) -> int:
-    """DOWN's target index -- the client's own words: 'if I just keep
-    clicking down down, it will scroll down and find games there'. A plain
-    ``+COLUMNS`` wrap keeps a card orbiting its own column forever whenever
-    the catalogue size shares a factor with :data:`COLUMNS` (any multiple of
-    3 -- 6, 9, 12 games all failed this before this fix), since the same
-    residue class is revisited every wrap and the other two columns are
-    never reached without a LEFT/RIGHT press. Wrapping into the *next*
-    column instead of the same one turns every wrap into progress rather
-    than a repeat, which is what makes repeated DOWN presses alone -- no
-    LEFT or RIGHT ever -- eventually surface every game, for any count.
+    """DOWN's target index: stays inside the column it started in.
+
+    A previous revision carried into the *next* column on wrap, so that
+    repeated DOWN presses alone would eventually surface every game. That
+    turned out to be the wrong trade: with a short final row, it meant DOWN
+    from the middle column jumped to a card in a completely different
+    column -- confusing on the cabinet, since visually you stay in your
+    column and the neighbouring column's card is what appears below you.
+    Column-preserving wrap (back to this column's own top row) is what
+    actually matches the board you can see; reaching every game again relies
+    on LEFT/RIGHT too, same as any ordinary grid.
     """
     if count <= 0:
         return 0
@@ -164,17 +157,16 @@ def _down_index(index: int, count: int) -> int:
     if next_row < rows_needed(count) and column < row_columns(count, next_row):
         return next_row * COLUMNS + column
     # Hit the bottom of this column (either the last row, or a short final
-    # row that doesn't reach this column) -- carry into the next column's
-    # top row instead of restarting this one.
-    new_column = (column + 1) % COLUMNS
-    if new_column < row_columns(count, 0):
-        return new_column
-    return 0
+    # row that doesn't reach this column) -- wrap to this same column's own
+    # top row. Row 0 always has every column whenever more than one row
+    # exists (only the very last row can be short), so this is always safe.
+    return column
 
 
 def _up_index(index: int, count: int) -> int:
-    """UP's target index -- the mirror image of :func:`_down_index`, for the
-    same reason: it must make progress on every wrap, not repeat.
+    """UP's target index -- the mirror image of :func:`_down_index`: stays
+    inside the column it started in, wrapping to that column's own bottom
+    row rather than carrying into a neighbour.
     """
     if count <= 0:
         return 0
@@ -185,15 +177,13 @@ def _up_index(index: int, count: int) -> int:
     prev_row = row - 1
     if prev_row >= 0 and column < row_columns(count, prev_row):
         return prev_row * COLUMNS + column
-    # Hit the top of this column -- carry into the previous column's bottom
-    # row. Only the final row can be short, so the row above it is always a
-    # full row; fall back one further row if the short final row doesn't
-    # reach the wrapped-to column.
-    new_column = (column - 1) % COLUMNS
+    # Hit the top of this column -- wrap to this column's bottom-most row.
+    # Only the final row can be short, so fall back one row further if it
+    # doesn't reach this column; every row before it is always full.
     last_row = rows_needed(count) - 1
-    if new_column >= row_columns(count, last_row):
+    if column >= row_columns(count, last_row):
         last_row -= 1
-    return last_row * COLUMNS + new_column
+    return last_row * COLUMNS + column
 
 
 class GridView(GalleryView):
@@ -204,16 +194,16 @@ class GridView(GalleryView):
     columns: ClassVar[int] = COLUMNS
 
     def navigate(self, index: int, count: int, direction: Direction) -> int:
-        """Move one slot, wrapping at every edge so the same rule reaches
-        every card in a catalogue of any size.
+        """Move one slot, wrapping at every edge.
 
-        Left/right step by one card. Up/down step by a whole row when the
-        row directly above/below has a card in the same column; otherwise
-        (the top or bottom of a column) they carry into the neighbouring
-        column rather than restarting the same one -- see
-        :func:`_down_index` for why that carry is not optional. Scrolling
-        (see :func:`target_scroll`) is purely a rendering concern layered on
-        top of this, never a navigation one.
+        Left/right step by one card, wrapping across the whole catalogue.
+        Up/down step by a whole row when the row directly above/below has a
+        card in the same column; otherwise (the top or bottom of that
+        column) they wrap to that same column's other end rather than
+        drifting into a neighbouring column -- see :func:`_down_index` for
+        why staying in-column is what actually matches what you see on
+        screen. Scrolling (see :func:`target_scroll`) is purely a rendering
+        concern layered on top of this, never a navigation one.
         """
         if count <= 0:
             return 0
@@ -233,14 +223,24 @@ class GridView(GalleryView):
     def slot_rect(row: int, column: int, count: int, scroll: float) -> pygame.Rect:
         """The on-screen rect for absolute (*row*, *column*) at *scroll*.
 
+        Rows fill left-to-right in reading order, always -- including a
+        short final row, which is left-aligned exactly like a full one
+        rather than centred. Centring used to be applied here (a leftover
+        from the paginated design, where a lone card on its own page looked
+        marooned), but it made a card's on-screen column disagree with its
+        actual index: with 7 games, index 6 is row 2 column 0, yet a centred
+        row drew it in the middle column, so pressing DOWN from the middle
+        column landed on a *different* card than the one that visually
+        looked like it was there. Left-aligning keeps a card's column always
+        equal to ``index % COLUMNS``, so what you see lines up with where
+        the stick actually takes you.
+
         May land partially or fully outside the visible content band --
         callers are responsible for clipping while a scroll is in progress.
         """
         rows = visible_rows(count)
         height = card_height(rows)
-        cols_in_row = row_columns(count, row)
-        dx = row_dx(cols_in_row)
-        x = CARD_MARGIN_X + dx + column * (CARD_WIDTH + CARD_GAP_X)
+        x = CARD_MARGIN_X + column * (CARD_WIDTH + CARD_GAP_X)
         y = CARD_TOP + (row - scroll) * (height + CARD_GAP_Y)
         return pygame.Rect(int(round(x)), int(round(y)), CARD_WIDTH, height)
 

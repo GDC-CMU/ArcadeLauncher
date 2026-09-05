@@ -274,50 +274,86 @@ class GridLayoutTests(unittest.TestCase):
                 self.assertGreater(grid.max_scroll_rows(count), 0.0)
 
 
-class GridRowCenteringTests(unittest.TestCase):
-    """A short final row -- now the whole catalogue's actual last row,
-    rather than a page's -- must stay centred under the full rows above it,
-    not hug the left margin. The same rule that used to apply per-page
-    still applies, just to one continuous board instead of six-card pages.
+class GridColumnAlignmentTests(unittest.TestCase):
+    """Rows fill left-to-right, always -- a short final row is left-aligned
+    exactly like a full one, never centred.
+
+    This used to centre a short row (right for the old paginated design,
+    where a lone card on its own page looked marooned) but it made a card's
+    on-screen column disagree with its actual index: with 7 games, index 6
+    (row 2, column 0) drew in the *middle* column, so pressing DOWN from the
+    middle column landed on UFO Race's neighbour, not UFO Race -- exactly
+    the bug the client hit on the cabinet. Column ``n`` on screen must always
+    be index ``n`` modulo :data:`~launcher.ui.views.grid.COLUMNS`, on every
+    row, with no exceptions.
     """
 
-    TOLERANCE = 2
+    def test_every_row_starts_at_the_left_margin(self) -> None:
+        """No row -- full or short -- ever gets a horizontal offset."""
+        for count in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 20):
+            for row in range(grid.rows_needed(count)):
+                with self.subTest(count=count, row=row):
+                    rect = GridView.slot_rect(row, 0, count, 0.0)
+                    self.assertEqual(rect.left, grid.CARD_MARGIN_X)
 
-    @staticmethod
-    def _bbox(rects: list[pygame.Rect]) -> pygame.Rect:
-        return rects[0].unionall(rects[1:]) if len(rects) > 1 else rects[0].copy()
-
-    def test_a_full_row_gets_no_centring_offset(self) -> None:
-        self.assertEqual(grid.row_dx(grid.COLUMNS), 0)
-
-    def test_a_short_final_row_is_centred_under_a_full_row(self) -> None:
+    def test_a_short_final_row_is_left_aligned_not_centred(self) -> None:
         for count in (4, 5, 7, 8, 10, 11, 20):
             total_rows = grid.rows_needed(count)
             last_row = total_rows - 1
             cols_in_last = grid.row_columns(count, last_row)
             if cols_in_last == grid.COLUMNS:
-                continue  # nothing short to centre for this count
+                continue  # nothing short in this catalogue's final row
             with self.subTest(count=count):
-                row0 = [
-                    GridView.slot_rect(0, column, count, 0.0)
-                    for column in range(grid.row_columns(count, 0))
-                ]
-                last = [
-                    GridView.slot_rect(last_row, column, count, 0.0)
-                    for column in range(cols_in_last)
-                ]
-                self.assertAlmostEqual(
-                    self._bbox(row0).centerx, self._bbox(last).centerx, delta=self.TOLERANCE
-                )
-                # It must actually be nudged inward, not just coincidentally
-                # aligned with the full row's own left edge.
-                self.assertGreater(last[0].left, row0[0].left)
+                full_row_first = GridView.slot_rect(0, 0, count, 0.0)
+                short_row_first = GridView.slot_rect(last_row, 0, count, 0.0)
+                # Same left edge as a full row -- not nudged inward at all.
+                self.assertEqual(short_row_first.left, full_row_first.left)
+
+    def test_on_screen_column_always_matches_index_modulo_columns(self) -> None:
+        """The concrete regression: a card's column position on screen must
+        equal ``index % COLUMNS`` for every row, including a short final one.
+        """
+        for count in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 20):
+            for row in range(grid.rows_needed(count)):
+                cols_in_row = grid.row_columns(count, row)
+                for column in range(cols_in_row):
+                    index = row * grid.COLUMNS + column
+                    with self.subTest(count=count, index=index):
+                        rect = GridView.slot_rect(row, column, count, 0.0)
+                        expected_left = grid.CARD_MARGIN_X + column * (
+                            grid.CARD_WIDTH + grid.CARD_GAP_X
+                        )
+                        self.assertEqual(rect.left, expected_left)
+                        self.assertEqual(index % grid.COLUMNS, column)
+
+    def test_columns_line_up_across_every_row(self) -> None:
+        """Column *n* sits at the same x for every row that has one -- a
+        full grid, not rows independently centred against each other."""
+        for count in (7, 8, 10, 11, 20):
+            with self.subTest(count=count):
+                rows = grid.rows_needed(count)
+                for column in range(grid.COLUMNS):
+                    lefts = {
+                        GridView.slot_rect(row, column, count, 0.0).left
+                        for row in range(rows)
+                        if column < grid.row_columns(count, row)
+                    }
+                    self.assertEqual(len(lefts), 1, f"column {column} drifts between rows")
 
 
 class GridScrollTests(unittest.TestCase):
     """The vertical scroll: keeps the selection visible without ever letting
-    it leave the band, glides rather than snaps, and (the client's own
-    words) walking DOWN repeatedly must eventually surface every game."""
+    it leave the band, and glides rather than snaps.
+
+    An earlier revision also made DOWN, pressed alone, eventually surface
+    every game -- by carrying into the neighbouring column whenever a wrap
+    would otherwise repeat a column. That is what caused the regression in
+    :class:`GridColumnPreservingNavigationTests`: the carry is a column
+    *jump*, and jumping columns is exactly what confused the client on the
+    cabinet. DOWN/UP now stay within the column they started in, so reaching
+    every game again relies on LEFT/RIGHT too -- a reasonable trade since a
+    real grid always needed both axes anyway.
+    """
 
     COUNTS = (1, 2, 6, 7, 9, 10, 11, 12, 20)
 
@@ -346,19 +382,6 @@ class GridScrollTests(unittest.TestCase):
                     self.assertGreaterEqual(target, 0.0)
                     self.assertLessEqual(target, maximum)
 
-    def test_every_index_reachable_by_pressing_down_repeatedly(self) -> None:
-        """The client's request, almost verbatim: 'if I just keep clicking
-        down down, it will scroll down and find games there'."""
-        view = view_for(ViewMode.GRID)
-        for count in (1, 2, 7, 9, 10, 12, 20):
-            with self.subTest(count=count):
-                index = 0
-                seen = {index}
-                for _ in range(count * 4):
-                    index = view.navigate(index, count, Direction.DOWN)
-                    seen.add(index)
-                self.assertEqual(seen, set(range(count)))
-
     def test_the_selection_stays_visible_throughout_a_down_walk(self) -> None:
         """Not just reachable eventually -- comfortably in view at every
         single step of the walk, not only once it settles."""
@@ -385,6 +408,60 @@ class GridScrollTests(unittest.TestCase):
             self.assertGreaterEqual(value, previous - 1e-9)
             self.assertLessEqual(value, target + 1e-9)
         self.assertAlmostEqual(value, target, places=2)
+
+
+class GridColumnPreservingNavigationTests(unittest.TestCase):
+    """The concrete regression from the cabinet: with a short final row
+    centred, pressing DOWN from the middle column landed on Pass The Game
+    instead of UFO Race -- the card that visually *looked* like it was in
+    the middle column. Left-aligning fixed the visual side; this fixes (and
+    pins) the navigation side: DOWN/UP now stay inside the column they
+    started in, wrapping at that column's own top/bottom rather than
+    carrying into a neighbour, so a card's column on screen and the column
+    the stick actually reaches can never disagree again.
+    """
+
+    COUNTS = range(7, 21)
+
+    def test_down_never_changes_column(self) -> None:
+        view = view_for(ViewMode.GRID)
+        for count in self.COUNTS:
+            for start in range(count):
+                column = start % grid.COLUMNS
+                index = start
+                for _ in range(count + 2):
+                    index = view.navigate(index, count, Direction.DOWN)
+                    with self.subTest(count=count, start=start, index=index):
+                        self.assertEqual(index % grid.COLUMNS, column)
+
+    def test_up_never_changes_column(self) -> None:
+        view = view_for(ViewMode.GRID)
+        for count in self.COUNTS:
+            for start in range(count):
+                column = start % grid.COLUMNS
+                index = start
+                for _ in range(count + 2):
+                    index = view.navigate(index, count, Direction.UP)
+                    with self.subTest(count=count, start=start, index=index):
+                        self.assertEqual(index % grid.COLUMNS, column)
+
+    def test_down_cycles_exactly_that_columns_indices_and_no_others(self) -> None:
+        """Repeated DOWN presses visit precisely the indices sharing the
+        starting column -- never fewer (a shorter loop skipping some of
+        them) and never more (a jump into a neighbouring column)."""
+        view = view_for(ViewMode.GRID)
+        for count in self.COUNTS:
+            for column in range(grid.COLUMNS):
+                expected = {index for index in range(count) if index % grid.COLUMNS == column}
+                if not expected:
+                    continue
+                with self.subTest(count=count, column=column):
+                    index = min(expected)
+                    seen = {index}
+                    for _ in range(count * 2):
+                        index = view.navigate(index, count, Direction.DOWN)
+                        seen.add(index)
+                    self.assertEqual(seen, expected)
 
 
 class GridRenderingTests(HeadlessCase):

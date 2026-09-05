@@ -59,6 +59,10 @@ VERTICAL_STOPS: tuple[tuple[float, float], ...] = ((0.0, 0.0), (1.0, 6.0), (2.0,
 #: rather than popping into view.
 NEIGHBOUR_CEILING = 2.0
 FADE_WIDTH = 1.0
+#: Peak opacity (0..255) of the black curtain drawn over the outermost 90px
+#: on each side of the stage, at the very screen edge -- see
+#: :meth:`CarouselView._draw_stage`.
+EDGE_FADE_PEAK = 90
 #: Discrete size steps, indexed by ``round(distance)`` clamped to the last one.
 SCALE_BY_BUCKET: tuple[float, ...] = (1.0, 0.74, 0.50)
 
@@ -166,7 +170,7 @@ class CarouselView(GalleryView):
         for side in (0, 1):
             fade = pygame.Surface((90, STAGE.height), pygame.SRCALPHA)
             for column in range(90):
-                fade_alpha = int(232 * ((90 - column) / 90) ** 1.6)
+                fade_alpha = int(EDGE_FADE_PEAK * ((90 - column) / 90) ** 1.6)
                 x = column if side == 0 else 89 - column
                 pygame.draw.line(fade, (*PALETTE["void"], fade_alpha), (x, 0), (x, STAGE.height))
             surface.blit(fade, (0 if side == 0 else SCREEN_WIDTH - 90, STAGE.top))

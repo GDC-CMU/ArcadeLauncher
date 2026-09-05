@@ -75,6 +75,15 @@ ROTATION_SQUEEZE = 0.58
 #: How much the far edge of a rotated card is compressed.
 FAR_EDGE_SCALE = 0.72
 
+#: Depth haze: a translucent void wash over cards further back, so they
+#: gently recede rather than snapping straight to full size/brightness.
+#: Kept low enough that even the deepest slot is still clearly game art, not
+#: a dark silhouette -- 38 + depth*44 (up to 170 at MAX_DEPTH) read as a
+#: blackout on the cabinet.
+HAZE_BASE = 18
+HAZE_STEP = 24
+HAZE_PEAK = 90
+
 #: Continuous horizontal offset per distance from the selection -- see
 #: :func:`~launcher.ui.effects.lerp_stops`. Only *position* is continuous;
 #: which depth slot (size/skew) a card renders at still snaps to the nearest
@@ -304,9 +313,11 @@ class CoverFlowView(GalleryView):
             return flat
 
         skewed = perspective(flat, near_left)
-        # Cards further back sit deeper in the haze.
+        # Cards further back sit deeper in the haze -- a gentle recede, not a
+        # blackout: the client's own words were that neighbouring covers
+        # "read as shadows" at the old 38 + depth*44 (up to 170 at MAX_DEPTH).
         haze = pygame.Surface(skewed.get_size(), pygame.SRCALPHA)
-        haze.fill((*PALETTE["void"], min(190, 38 + depth * 44)))
+        haze.fill((*PALETTE["void"], min(HAZE_PEAK, HAZE_BASE + depth * HAZE_STEP)))
         skewed.blit(haze, (0, 0))
         return skewed
 

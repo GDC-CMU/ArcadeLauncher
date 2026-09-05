@@ -152,7 +152,30 @@ class GallerySession:
         self.settings = settings
         self.states = states
         self.sync = sync
-        self.renderer = Renderer(RenderContext(previews=PreviewLibrary(cache_root)))
+        #: Where a game's checkout lives, for attract mode's preview
+        #: animations -- kept here (not baked into a renderer built once)
+        #: because the renderer itself must be rebuilt every session; see
+        #: :meth:`_open_display` and the attribute docstring on
+        #: :attr:`renderer`.
+        self._cache_root = cache_root
+        #: Built fresh in :meth:`_open_display` and dropped in
+        #: :meth:`_release_sdl` -- ``None`` only outside the lifetime of one
+        #: SDL session. This must never survive across a teardown: every
+        #: Surface and Font it caches (backgrounds, card art, the logo,
+        #: decoded preview frames, and every ``pygame.font.Font`` a
+        #: ``FontBook``/``PixelFont`` lazily creates) is freed at the C level
+        #: the instant ``pygame.font.quit()``/``pygame.quit()`` run in
+        #: ``_release_sdl``. A renderer built once in ``__init__`` and reused
+        #: across the many sessions one ``GallerySession`` instance lives
+        #: through would keep drawing with those same Python objects after
+        #: the memory behind them was freed -- readable as "Couldn't find
+        #: glyph" on the very next font lookup, then a native access
+        #: violation on the next Surface blit, and it would take out the
+        #: *error-notice* rendering path along with everything else, since
+        #: that path uses the very same cached fonts. Rebuilding per session
+        #: is what makes a stale reference structurally impossible rather
+        #: than merely avoided.
+        self.renderer: Renderer | None = None
         self.navigation = NavigationController.from_policy(
             RepeatPolicy(
                 initial_delay_ms=settings.nav_initial_delay_ms,
@@ -229,6 +252,13 @@ class GallerySession:
         pygame.display.set_caption("GDC Arcade")
         pygame.mouse.set_visible(False)  # criterion G5: nothing is mouse-driven
 
+        # Built fresh every time SDL comes up -- see the docstring on
+        # :attr:`renderer` in __init__ for why this may never be the same
+        # object (or hold a single cached Surface/Font) a previous session
+        # used.
+        self.renderer = Renderer(RenderContext(previews=PreviewLibrary(self._cache_root)))
+        self._on_renderer_ready()
+
         self.navigation.reset()
         self._attract.reset()
         self._joysticks.clear()
@@ -276,7 +306,23 @@ class GallerySession:
             except pygame.error as exc:
                 _log.warning("could not release SDL %s subsystem: %s", name, exc)
         pygame.quit()
+        # Every Surface and Font the renderer cached is now a dangling
+        # pointer at the C level -- pygame.font.quit()/pygame.quit() just
+        # freed the memory behind them. Dropping the whole renderer (rather
+        # than trying to selectively clear its caches) is what guarantees
+        # nothing here can be drawn with again before _open_display builds a
+        # fresh one; see the attribute docstring in __init__.
+        self.renderer = None
         _log.debug("SDL released")
+
+    def _on_renderer_ready(self) -> None:
+        """Called once :attr:`renderer` is freshly (re)built. A no-op here;
+        a seam for tests that need to reach into a session's ``RenderContext``
+        -- to register a fixture preview, or to wrap ``draw`` for recording --
+        at the one moment it is guaranteed to exist and be current. See
+        ``ScriptedSession`` in ``tests.test_gallery``.
+        """
+        return None
 
     def _joystick_count(self) -> int:
         """How many joystick devices to enumerate at open.

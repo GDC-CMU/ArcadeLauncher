@@ -346,12 +346,22 @@ def _give_previews(game, game_ids=None) -> None:
     about preview *eligibility* (see ``EligibilityIntegrationTests``) -- and
     since attract can only ever settle on an eligible game, those tests need
     at least one to look "watchable" or attract could never trigger at all.
+
+    ``game.renderer`` does not exist yet at the point every caller uses this
+    (before the session has opened its display for the first time -- see the
+    attribute docstring on ``GallerySession.renderer``), so the injection is
+    deferred to :meth:`~launcher.gallery.GallerySession._on_renderer_ready`,
+    which fires once a fresh ``RenderContext`` actually exists.
     """
     ids = game_ids if game_ids is not None else [g.id for g in gt.MANIFEST if g.launchable]
-    for game_id in ids:
-        game.renderer.ctx.previews._animations[game_id] = PreviewAnimation(
-            fps=8, frames=tuple(pygame.Surface((4, 3)) for _ in range(8))
-        )
+
+    def inject(session) -> None:
+        for game_id in ids:
+            session.renderer.ctx.previews._animations[game_id] = PreviewAnimation(
+                fps=8, frames=tuple(pygame.Surface((4, 3)) for _ in range(8))
+            )
+
+    game.on_renderer_ready_hooks.append(inject)
 
 
 def _make_session(script, *, attract_idle_ms=1000, attract_rng=None, give_previews=True, **kwargs):
@@ -377,16 +387,28 @@ def _make_session(script, *, attract_idle_ms=1000, attract_rng=None, give_previe
 
 
 def _record(game) -> list:
-    """Capture every :class:`GalleryFrame` the session renders, in order."""
+    """Capture every :class:`GalleryFrame` the session renders, in order.
+
+    Wraps ``renderer.draw`` -- but the renderer is rebuilt fresh every time
+    the session opens its display (see the attribute docstring on
+    ``GallerySession.renderer``), so the wrap is (re)applied via
+    ``_on_renderer_ready`` rather than just once, here, on whatever renderer
+    happens to exist at call time (there may not be one yet at all).
+    """
     recorded: list = []
-    original = game.renderer.draw
 
-    def spy(surface, frame):
-        recorded.append(frame)
-        return original(surface, frame)
+    def wrap(session) -> None:
+        original = session.renderer.draw
 
-    game.renderer.draw = spy
+        def spy(surface, frame):
+            recorded.append(frame)
+            return original(surface, frame)
+
+        session.renderer.draw = spy
+
+    game.on_renderer_ready_hooks.append(wrap)
     return recorded
+
 
 
 #: One frame at ScriptedSession's fixed 16ms/frame clock.

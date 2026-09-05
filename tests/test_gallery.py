@@ -7,6 +7,7 @@ joystick hardware is required and no repository is touched.
 from __future__ import annotations
 
 import math
+from typing import Callable
 
 import support  # noqa: F401 - pins SDL to the dummy drivers before pygame loads
 import unittest
@@ -136,6 +137,20 @@ class ScriptedSession(GallerySession):
         #: How many consecutive frames the safety net below has been firing.
         #: Used only to alternate it between down and up -- see _pump.
         self._safety_net_frames = 0
+        #: Called every time :meth:`_on_renderer_ready` fires -- i.e. every
+        #: time ``_open_display`` (re)builds ``self.renderer`` -- so a test
+        #: can register a fixture preview or wrap ``draw`` for recording at
+        #: the one moment a fresh ``RenderContext`` is guaranteed to exist.
+        #: A renderer built once in ``__init__`` used to make "patch it
+        #: right after construction" work; now that it is rebuilt per
+        #: session (see the attribute docstring on ``GallerySession.
+        #: renderer``), anything a test wants to survive into the render
+        #: loop has to be re-applied here instead.
+        self.on_renderer_ready_hooks: list[Callable[["ScriptedSession"], None]] = []
+
+    def _on_renderer_ready(self) -> None:  # type: ignore[override]
+        for hook in self.on_renderer_ready_hooks:
+            hook(self)
 
     def _tick(self, clock):  # type: ignore[override]
         return self.FRAME_MS
@@ -732,6 +747,75 @@ class SdlLifecycleTests(unittest.TestCase):
             game = session([[key_event(pygame.K_ESCAPE)]])
             self.assertIs(game(SessionState()).action, UiAction.QUIT)
             self.assertFalse(pygame.get_init())
+
+
+class RendererLifetimeTests(unittest.TestCase):
+    """Regression: one ``GallerySession`` is reused across every launch by
+    the real supervisor -- see ``main.py``, which builds it once and hands
+    it to ``Supervisor`` as the ``ui`` callable. Nothing the renderer caches
+    (fonts, surfaces, decoded preview frames, the logo) may survive the SDL
+    teardown between one session and the next: ``pygame.font.quit()`` and
+    ``pygame.quit()`` free that memory at the C level, so drawing with the
+    same Python objects afterwards means every ``Font.size()``/``Surface``
+    call touches freed memory -- readable first as pygame's own "Couldn't
+    find glyph", then a native access violation, on the very next session.
+    """
+
+    def _session_with_capture(self, script):
+        settings = Settings(fullscreen=False, frame_rate=60, sync_on_start=False)
+        states = {game.id: GameState(game.id, GameStatus.READY, "") for game in MANIFEST}
+        game = ScriptedSession(MANIFEST, settings, states, None, script=script)
+        seen: list = []
+        game.on_renderer_ready_hooks.append(lambda opened: seen.append(opened.renderer))
+        return game, seen
+
+    def test_no_renderer_survives_release_sdl(self) -> None:
+        """The invariant that actually matters, checked directly: whatever
+        the dummy driver does or does not let crash, the object must be gone."""
+        game, _ = self._session_with_capture([[key_event(pygame.K_ESCAPE)]])
+        game(SessionState())
+        self.assertIsNone(
+            game.renderer, "no SDL-backed object may survive _release_sdl()"
+        )
+
+    def test_the_renderer_is_a_new_object_every_session(self) -> None:
+        """Fails against the pre-fix code: a renderer built once in
+        ``__init__`` is the *same* object both times."""
+        game, seen = self._session_with_capture([[key_event(pygame.K_ESCAPE)]])
+        game(SessionState())
+        game(SessionState())
+        self.assertEqual(len(seen), 2)
+        self.assertIsNotNone(seen[0])
+        self.assertIsNotNone(seen[1])
+        self.assertIsNot(
+            seen[0], seen[1], "the second session must not reuse the first renderer"
+        )
+        # And not merely the outer object -- every cache the stale-object
+        # bug could hide in must also be rebuilt, not shared.
+        self.assertIsNot(seen[0].ctx, seen[1].ctx)
+        self.assertIsNot(seen[0].ctx.cache, seen[1].ctx.cache)
+        self.assertIsNot(seen[0].ctx.fonts, seen[1].ctx.fonts)
+        self.assertIsNot(seen[0].ctx.pixel, seen[1].ctx.pixel)
+        self.assertIsNot(seen[0].ctx.previews, seen[1].ctx.previews)
+
+    def test_a_notice_renders_correctly_on_a_freshly_reopened_session(self) -> None:
+        """The exact path that hard-crashed for real on the cabinet: a
+        ``Notice`` banner (from ``draw_notice`` -> ``_truncate`` ->
+        ``font.size()``), drawn on the *second* session one reused
+        ``GallerySession`` instance runs -- never the first, where a fresh
+        renderer always happens to be correct even with the bug present."""
+        game = session([[key_event(pygame.K_ESCAPE)]])
+        first = game(SessionState())
+        self.assertIs(first.action, UiAction.QUIT)
+
+        notice = Notice(
+            "error",
+            "Street Fighter exited with code 1",
+            "A long enough detail string that the banner has to wrap or "
+            "truncate it, exactly like the real crash's own notice did.",
+        )
+        second = game(SessionState(notice=notice))
+        self.assertIs(second.action, UiAction.QUIT)
 
 
 if __name__ == "__main__":  # pragma: no cover

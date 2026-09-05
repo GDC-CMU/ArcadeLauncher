@@ -300,20 +300,39 @@ that closes the duplicate handle. Navigation was never affected — held
 directions are merged as a set, so a doubled device could not double-step the
 selection — and there is a test pinning that, so it stays true.
 
-**The launcher must never exit without saying why.** A game exiting cleanly and
-the launcher never coming back — with no traceback, no error, nothing after the
-child's own "exited with code 0" line — was reported directly from a cabinet
-console. Every route out of `Supervisor.run()` now logs at INFO or louder before
-it returns or raises, including the loop's own fall-through and a last-resort
-handler for anything that is not even an `Exception` subclass (a stray
-`SystemExit`, most plausibly), so a genuine Ctrl+C, a crashed gallery and a
-silent process death are never indistinguishable in the log again. `main.py`
-also enables Python's `faulthandler` at start-up: it cannot prevent a fatal
-native fault inside a C extension such as SDL, but it prints what every thread
-was doing at the moment of one, which turns "vanished without a trace" into a
-diagnosable stack. A launched game now also runs in its own console process
-group (`CREATE_NEW_PROCESS_GROUP` on Windows, `start_new_session` on POSIX) —
-the same isolation `launcher/cache.py` already gave git subprocesses — so a
+**No SDL-backed object may outlive the SDL session that created it.** A game
+exiting cleanly and the launcher never coming back — with no traceback, no
+error, nothing after the child's own "exited with code 0" line — was reported
+directly from a cabinet console, and later reproduced exactly: `pygame.error:
+Couldn't find glyph` followed by `Windows fatal exception: access violation`,
+inside the very first `font.size()` call after the gallery reopened. The
+`GallerySession`'s renderer used to be built once, in `__init__`, and reused
+for every launch — but `_release_sdl()` runs `pygame.font.quit()` and
+`pygame.quit()` between every game, which free every cached `Font` and
+`Surface` at the C level. The long-lived renderer kept drawing with the same
+Python objects afterwards, now pointing at freed memory: readable as a
+missing glyph on the next font lookup, then an access violation on the next
+Surface blit — and it took out the *error-notice* banner along with
+everything else, since that path draws with the same cached fonts, turning a
+recoverable failure into a silent crash. The renderer (and everything it
+caches — fonts, surfaces, the logo, decoded preview frames) is now rebuilt
+from scratch in `_open_display()` and dropped in `_release_sdl()`, so a stale
+reference cannot exist to be drawn with; `tests/test_gallery.py::
+RendererLifetimeTests` pins it, including one test that reproduces the exact
+access violation above against the pre-fix code.
+
+Separately, and worth keeping regardless: every route out of
+`Supervisor.run()` now logs at INFO or louder before it returns or raises,
+including the loop's own fall-through and a last-resort handler for anything
+that is not even an `Exception` subclass (a stray `SystemExit`), so a genuine
+Ctrl+C, a crashed gallery and a silent process death are never
+indistinguishable in the log again. `main.py` also enables Python's
+`faulthandler` at start-up — it cannot prevent a fatal native fault inside a
+C extension such as SDL, but it prints what every thread was doing at the
+moment of one, which is what first pointed at the crash above instead of
+nothing. A launched game now also runs in its own console process group
+(`CREATE_NEW_PROCESS_GROUP` on Windows, `start_new_session` on POSIX) — the
+same isolation `launcher/cache.py` already gave git subprocesses — so a
 Ctrl+C aimed at the launcher's console and whatever the game's own SDL/input
 layer does with a console signal can never be mistaken for one another.
 
@@ -613,7 +632,7 @@ assets/preview/frame_001.png
 | Screenshot tests fail right after cloning | Your Pygame/SDL_ttf differs from the one that generated the committed PNGs | Not expected any more — that comparison now skips itself with an explanatory message. If a screenshot test *does* fail it means the UI really did change: run `python -m tools.generate_previews` and commit the result. |
 | Launcher will not close; the menu cannot stop it | A termination signal was caught but the running gallery never saw it | Fixed: the loop checks the shutdown flag every frame and exits in ~50 ms. Never use the reset button for this — the maintainer warns it risks filesystem corruption. |
 | Each joystick logged twice at start-up | SDL announces an already-connected device through both enumeration and `JOYDEVICEADDED` | Fixed: devices are keyed by SDL instance id, so the second announcement is ignored. Navigation was never double-stepping. |
-| Launcher ends after a game exits, with nothing after "exited with code N" in the log | Either a genuine Ctrl+C (now logged as such) or a fatal native fault in a C extension | Every ordinary exit path now logs why. If the log still ends with no explanation at all, that is `faulthandler`'s territory: it prints the state of every thread at the moment of a fatal fault to the same stderr stream, so re-run with the fault visible instead of silent. |
+| Launcher ends after a game exits, with nothing after "exited with code N" in the log | Fixed: the renderer used to be built once and reused, so it kept drawing with fonts/surfaces `_release_sdl()` had just freed — a stale font lookup, then a native access violation, on the very next session | The renderer is now rebuilt fresh every session and dropped on release; `RendererLifetimeTests` pins it. If a silent ending still recurs, `faulthandler` (enabled in `main.py`) prints the state of every thread at the moment of a fatal fault to the same stderr stream instead of nothing. |
 
 ## Club-fair preflight
 

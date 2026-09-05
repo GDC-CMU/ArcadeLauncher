@@ -84,11 +84,20 @@ _LAUNCH_REFRESH_TIMEOUT_MS = 2000
 #: ``pygame.key.get_pressed()``/``Joystick.get_button()`` reading of "not
 #: held" enough to arm an exit source on it -- see the docstring on
 #: :meth:`GallerySession._sync_exit_arming` for the failure this guards
-#: against. Comparable to (and no worse than) the settle window this
-#: replaced; a visitor cannot perceive a quarter-second and essentially never
-#: presses Esc/P1 that fast after the gallery appears, so the common case
-#: still arms -- and fires -- promptly.
-_EXIT_ARM_FALLBACK_GRACE_MS = 250
+#: against. A prior value of 250ms was measured to still be too short: a
+#: real window on the cabinet's environment was measured taking well over a
+#: second to report input focus at all (``pygame.key.get_focused()`` never
+#: turned true within 4s in that measurement), so 250ms after open, SDL's
+#: keyboard state was still all-zero from lack of focus, not from release,
+#: and the fallback armed a key that was still physically held. A full
+#: second is long enough to comfortably outlast both a human's hold through
+#: a game exit and a slow window-focus transition, while still costing a
+#: visitor nothing perceptible: an EXIT press in the very first moment of a
+#: freshly opened gallery is essentially always stale input carried over
+#: from the game that just closed, never genuine intent -- nobody reacts to
+#: a screen they have not registered seeing yet in under a second, so
+#: refusing EXIT for that long risks nothing real.
+_EXIT_ARM_FALLBACK_GRACE_MS = 1000
 
 
 def _never() -> bool:
@@ -150,6 +159,17 @@ class GallerySession:
         #: how long it is held; once armed, EXIT is immediate.
         self._disarmed_exit_keys: set[int] = set()
         self._disarmed_exit_buttons: set[tuple[int, int]] = set()
+        #: Exit-mapped keys/buttons directly observed as pressed via a real
+        #: KEYDOWN/JOYBUTTONDOWN event since their last release -- belt and
+        #: braces for :meth:`_sync_exit_arming`'s fallback: a source in here
+        #: has actual event evidence of being down right now, not merely a
+        #: ``get_pressed()``/``get_button()`` sample, so the fallback must
+        #: never arm it no matter what that sample says or how much grace
+        #: has elapsed. Only a KEYUP/JOYBUTTONUP removes an entry. A source
+        #: that never appears here at all is the "never held" case the
+        #: fallback exists for -- see the docstring there.
+        self._observed_down_exit_keys: set[int] = set()
+        self._observed_down_exit_buttons: set[tuple[int, int]] = set()
 
     # ------------------------------------------------------------------
     # Entry point (the supervisor's UiFactory)
@@ -194,6 +214,8 @@ class GallerySession:
             key for key, command in KEY_COMMANDS.items() if command is Command.EXIT
         }
         self._disarmed_exit_buttons = set()
+        self._observed_down_exit_keys = set()
+        self._observed_down_exit_buttons = set()
         for index in range(self._joystick_count()):
             self._attach_joystick(index)
 
@@ -338,6 +360,15 @@ class GallerySession:
         what it says. Before that, this is a no-op and only the KEYUP/
         JOYBUTTONUP fast path above can arm anything, exactly as if nothing
         were held yet -- which is the safe assumption until proven otherwise.
+
+        Belt and braces on top of the grace period: a source with a real
+        KEYDOWN/JOYBUTTONDOWN event already recorded against it in
+        ``_observed_down_exit_keys``/``_observed_down_exit_buttons`` is
+        skipped outright, whatever ``get_pressed()``/``get_button()`` say.
+        That set is direct event evidence, not a poll -- strictly stronger
+        proof than any sample this method could take -- so once a source
+        has shown itself down for real, only an actual KEYUP/JOYBUTTONUP
+        may arm it, never a timing heuristic.
         """
         if not self._disarmed_exit_keys and not self._disarmed_exit_buttons:
             return
@@ -345,9 +376,13 @@ class GallerySession:
             return
         pygame.event.pump()
         for key in list(self._disarmed_exit_keys):
+            if key in self._observed_down_exit_keys:
+                continue
             if not self._is_key_held(key):
                 self._disarmed_exit_keys.discard(key)
         for pair in list(self._disarmed_exit_buttons):
+            if pair in self._observed_down_exit_buttons:
+                continue
             if not self._is_button_held(*pair):
                 self._disarmed_exit_buttons.discard(pair)
 
@@ -360,6 +395,7 @@ class GallerySession:
                 _log.debug("joystick %s already gone: %s", instance_id, exc)
         self.navigation.axes.detach(instance_id)
         self._disarmed_exit_buttons.discard((instance_id, BUTTON_EXIT))
+        self._observed_down_exit_buttons.discard((instance_id, BUTTON_EXIT))
         _log.info("joystick detached: instance %s", instance_id)
 
     # ------------------------------------------------------------------
@@ -435,14 +471,28 @@ class GallerySession:
                     self.navigation.press_key(KEY_DIRECTIONS[event.key])
                 elif event.type == pygame.KEYUP:
                     self._disarmed_exit_keys.discard(event.key)
+                    self._observed_down_exit_keys.discard(event.key)
                     if event.key in KEY_DIRECTIONS:
                         self.navigation.release_key(KEY_DIRECTIONS[event.key])
                 elif event.type == pygame.JOYBUTTONUP:
-                    self._disarmed_exit_buttons.discard((event.instance_id, event.button))
+                    pair = (event.instance_id, event.button)
+                    self._disarmed_exit_buttons.discard(pair)
+                    self._observed_down_exit_buttons.discard(pair)
 
                 if command is None:
                     continue
                 if command is Command.EXIT:
+                    # Direct event evidence that this source is down right
+                    # now -- recorded before the suppression check purely as
+                    # bookkeeping for _sync_exit_arming's fallback (see its
+                    # docstring); it never affects whether *this* command
+                    # fires.
+                    if event.type == pygame.KEYDOWN:
+                        self._observed_down_exit_keys.add(event.key)
+                    elif event.type == pygame.JOYBUTTONDOWN:
+                        self._observed_down_exit_buttons.add(
+                            (event.instance_id, event.button)
+                        )
                     if self._exit_is_suppressed(event):
                         _log.debug("ignoring exit: not yet armed")
                         continue

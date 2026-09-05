@@ -6,11 +6,18 @@ joystick hardware is required and no repository is touched.
 
 from __future__ import annotations
 
+import math
+
 import support  # noqa: F401 - pins SDL to the dummy drivers before pygame loads
 import unittest
 
 from launcher.controls import BUTTON_CYCLE_VIEW, BUTTON_EXIT, BUTTON_LAUNCH, Command
-from launcher.gallery import KEY_COMMANDS, KEY_DIRECTIONS, GallerySession
+from launcher.gallery import (
+    _EXIT_ARM_FALLBACK_GRACE_MS,
+    KEY_COMMANDS,
+    KEY_DIRECTIONS,
+    GallerySession,
+)
 from launcher.input_state import Direction
 from launcher.manifest import load_manifest
 from launcher.settings import Settings
@@ -20,6 +27,12 @@ from launcher.ui.pygame_runtime import pygame
 from launcher.viewmodes import ViewMode
 
 MANIFEST = load_manifest()
+
+#: Scripted frames needed for GallerySession._sync_exit_arming's fallback
+#: grace period to elapse, at ScriptedSession's fixed 16ms/frame clock.
+#: Derived from the real constant rather than a hard-coded number so these
+#: tests track it if it ever changes.
+GRACE_FRAMES = math.ceil(_EXIT_ARM_FALLBACK_GRACE_MS / 16)
 
 
 def key_event(key: int, down: bool = True) -> pygame.event.Event:
@@ -332,7 +345,14 @@ class LoopTests(unittest.TestCase):
 
     def test_a_held_stick_does_not_run_away(self) -> None:
         """Criterion E4: 12 frames of holding is one step, not twelve."""
-        script = [[axis_event(0, 1.0)]] + [[] for _ in range(12)]
+        script = (
+            [[axis_event(0, 1.0)]]
+            + [[] for _ in range(12)]
+            # Released before Escape: navigation must not keep stepping
+            # while the exit gate's own grace period runs its course, which
+            # would otherwise perturb the very count this test measures.
+            + [[axis_event(0, 0.0)]]
+        )
         script.append([key_event(pygame.K_ESCAPE)])
         _, outcome = self.run_session(script)
         self.assertEqual(outcome.selected_index, 1)
@@ -344,7 +364,12 @@ class LoopTests(unittest.TestCase):
         repeat, a 30-frame (480ms) hold is one initial step plus exactly one
         repeat -- never the 30 steps a naive loop would take.
         """
-        script = [[axis_event(0, 1.0)]] + [[] for _ in range(30)]
+        script = (
+            [[axis_event(0, 1.0)]]
+            + [[] for _ in range(30)]
+            # Released before Escape -- see test_a_held_stick_does_not_run_away.
+            + [[axis_event(0, 0.0)]]
+        )
         script.append([key_event(pygame.K_ESCAPE)])
         _, outcome = self.run_session(script)
         self.assertEqual(outcome.selected_index, 2)
@@ -601,35 +626,47 @@ class ExitArmingTests(unittest.TestCase):
         """The overwhelmingly common case -- Escape was not held at all when
         the session opened -- must still arm and fire an ordinary press
         promptly, not be blocked forever by the fix below."""
-        script = [[] for _ in range(20)] + [[key_event(pygame.K_ESCAPE)]]
+        empty_frames = GRACE_FRAMES + 2
+        script = [[] for _ in range(empty_frames)] + [[key_event(pygame.K_ESCAPE)]]
         game, outcome = self.run_session(script)
         self.assertIs(outcome.action, UiAction.QUIT)
-        self.assertEqual(game.frames, 21, "an armed, ordinary press must fire immediately")
+        self.assertEqual(
+            game.frames, empty_frames + 1, "an armed, ordinary press must fire immediately"
+        )
 
     def test_a_genuine_button_quits_once_it_has_had_a_chance_to_arm(self) -> None:
-        script = [[] for _ in range(20)] + [[button_event(BUTTON_EXIT)]]
+        empty_frames = GRACE_FRAMES + 2
+        script = [[] for _ in range(empty_frames)] + [[button_event(BUTTON_EXIT)]]
         game, outcome = self.run_session(script, joysticks=(FakeJoystick(instance_id=0),))
         self.assertIs(outcome.action, UiAction.QUIT)
-        self.assertEqual(game.frames, 21, "an armed, ordinary press must fire immediately")
+        self.assertEqual(
+            game.frames, empty_frames + 1, "an armed, ordinary press must fire immediately"
+        )
 
-    def test_a_key_held_at_open_is_not_armed_by_an_unfocused_first_reading(self) -> None:
-        """The exact failure the client reproduced a second time: the freshly
+    def test_a_key_held_at_open_survives_a_long_focus_delay(self) -> None:
+        """The exact failure the client reproduced, twice: the freshly
         opened window has not gained input focus yet, so it receives no
-        input at all for its first few frames -- not because nothing is
-        held, but because the window has not started receiving input yet.
+        input at all for a long stretch -- not because nothing is held, but
+        because the window has not started receiving input yet. Measured
+        directly on the client's cabinet, ``pygame.key.get_focused()`` did
+        not turn true even four seconds after the window was created, so
+        this models a delay comparable to what was actually observed: far
+        longer than a naive settle window, well past where an earlier,
+        shorter grace period had already been shown to fail.
+
         A ``pygame.key.get_pressed()`` fallback that trusts an early "not
         held" reading arms Escape before the window has ever seen the
-        truth; once real focus arrives moments later and delivers the
-        still-held key's genuine KEYDOWN, that wrongly-armed source fires
-        an immediate, unwanted exit straight out of the gallery. It must
-        not: the fallback must not answer "not held" until it has had a
-        real chance to be right, so the still-held key must stay disarmed
-        straight through the no-input gap and into the frames where the
-        real, still-held key starts arriving -- and only a genuine release
-        may arm it.
+        truth; once real focus arrives and delivers the still-held key's
+        genuine KEYDOWN, that wrongly-armed source fires an immediate,
+        unwanted exit straight out of the gallery. It must not: the
+        fallback must not answer "not held" until it has had a real chance
+        to be right, so the still-held key must stay disarmed straight
+        through the no-input gap and into the frames where the real,
+        still-held key starts arriving -- and only a genuine release may
+        arm it.
         """
-        unfocused_frames = 5  # no window focus yet: nothing is delivered at all
-        held_frames = 30  # focus has arrived: the still-held key is now visible
+        unfocused_frames = GRACE_FRAMES - 3  # no focus yet: nothing delivered at all
+        held_frames = 40  # focus has arrived: the still-held key is now visible
         script = (
             [[] for _ in range(unfocused_frames)]
             + [[key_event(pygame.K_ESCAPE)] for _ in range(held_frames)]
@@ -645,11 +682,11 @@ class ExitArmingTests(unittest.TestCase):
             "gained focus yet when it was (wrongly) sampled as 'not held'",
         )
 
-    def test_a_button_held_at_open_is_not_armed_by_an_unfocused_first_reading(self) -> None:
+    def test_a_button_held_at_open_survives_a_long_focus_delay(self) -> None:
         """The joystick half of the same regression -- and the more
         important one, since P1 is the control the cabinet actually uses."""
-        unfocused_frames = 5
-        held_frames = 30
+        unfocused_frames = GRACE_FRAMES - 3
+        held_frames = 40
         script = (
             [[] for _ in range(unfocused_frames)]
             + [[button_event(BUTTON_EXIT)] for _ in range(held_frames)]

@@ -97,8 +97,6 @@ class ScriptedSession(GallerySession):
         self,
         *args,
         script,
-        held_keys: frozenset[int] = frozenset(),
-        held_buttons: frozenset[tuple[int, int]] = frozenset(),
         joysticks: tuple[FakeJoystick, ...] = (),
         **kwargs,
     ) -> None:
@@ -106,16 +104,25 @@ class ScriptedSession(GallerySession):
         self._script = list(script)
         self.frames = 0
         self._joystick_fakes = list(joysticks)
-        # Ground truth for the arming seam below (_is_key_held/_is_button_held):
-        # starts from whatever the test says is already down the instant the
-        # session opens -- standing in for a key or button still physically
-        # held from before the transition -- then tracks every KEYUP/KEYDOWN/
-        # JOYBUTTONUP/JOYBUTTONDOWN the script plays. A headless dummy SDL
-        # driver never reflects these synthetic events in real key/joystick
-        # state, which is exactly why this seam exists rather than trusting
-        # pygame.key.get_pressed()/Joystick.get_button() in tests.
-        self._synthetic_keys_down: set[int] = set(held_keys)
-        self._synthetic_buttons_down: set[tuple[int, int]] = set(held_buttons)
+        # Ground truth for the arming fallback seam (_is_key_held/
+        # _is_button_held): what is down *as of the most recently pumped
+        # frame*, derived solely from that frame's batch -- recomputed fresh
+        # every _pump() call, never accumulated across frames. This is
+        # deliberate and matches two things a test needs to model
+        # separately: a single scripted KEYDOWN with no matching KEYUP is
+        # the idiom the rest of this suite uses for "the visitor tapped and
+        # let go", so it must count as held for that one frame only, not
+        # forever; a *held* key/button, by contrast, is modelled by
+        # repeating the KEYDOWN/JOYBUTTONDOWN in every consecutive frame's
+        # batch, which keeps it in this set on every one of those frames
+        # too. A batch with nothing in it (no events at all) correctly
+        # reports nothing held -- exactly what a real, unfocused window's
+        # input state looks like before it has started receiving input.
+        self._keys_down_this_frame: set[int] = set()
+        self._buttons_down_this_frame: set[tuple[int, int]] = set()
+        #: How many consecutive frames the safety net below has been firing.
+        #: Used only to alternate it between down and up -- see _pump.
+        self._safety_net_frames = 0
 
     def _tick(self, clock):  # type: ignore[override]
         return self.FRAME_MS
@@ -124,17 +131,31 @@ class ScriptedSession(GallerySession):
         self.frames += 1
         if not self._script:
             # Safety net: never hang a test if the script forgot to exit.
-            return [key_event(pygame.K_ESCAPE)]
-        batch = self._script.pop(0)
+            # Alternates down/up rather than repeating a bare KEYDOWN every
+            # frame forever: under the per-frame tracking above, a KEYDOWN
+            # repeated indefinitely *is* an indefinite hold, which the fix
+            # this suite is pinned to correctly refuses to ever arm --
+            # exactly the deadlock this alternation exists to avoid. The
+            # up half of each cycle is also what a genuinely stuck test
+            # needs to actually reach QUIT rather than hang forever.
+            self._safety_net_frames += 1
+            down = self._safety_net_frames % 2 == 1
+            batch = [key_event(pygame.K_ESCAPE, down=down)]
+        else:
+            batch = self._script.pop(0)
+        keys_down = set()
+        buttons_down = set()
         for event in batch:
             if event.type == pygame.KEYDOWN:
-                self._synthetic_keys_down.add(event.key)
+                keys_down.add(event.key)
             elif event.type == pygame.KEYUP:
-                self._synthetic_keys_down.discard(event.key)
+                keys_down.discard(event.key)
             elif event.type == pygame.JOYBUTTONDOWN:
-                self._synthetic_buttons_down.add((event.instance_id, event.button))
+                buttons_down.add((event.instance_id, event.button))
             elif event.type == pygame.JOYBUTTONUP:
-                self._synthetic_buttons_down.discard((event.instance_id, event.button))
+                buttons_down.discard((event.instance_id, event.button))
+        self._keys_down_this_frame = keys_down
+        self._buttons_down_this_frame = buttons_down
         return batch
 
     def _joystick_count(self):  # type: ignore[override]
@@ -144,10 +165,10 @@ class ScriptedSession(GallerySession):
         return self._joystick_fakes[index]
 
     def _is_key_held(self, key: int) -> bool:  # type: ignore[override]
-        return key in self._synthetic_keys_down
+        return key in self._keys_down_this_frame
 
     def _is_button_held(self, instance_id: int, button: int) -> bool:  # type: ignore[override]
-        return (instance_id, button) in self._synthetic_buttons_down
+        return (instance_id, button) in self._buttons_down_this_frame
 
 
 def session(
@@ -155,8 +176,6 @@ def session(
     *,
     states=None,
     default_view=ViewMode.GRID,
-    held_keys=frozenset(),
-    held_buttons=frozenset(),
     joysticks=(),
 ) -> ScriptedSession:
     settings = Settings(
@@ -176,8 +195,6 @@ def session(
         live,
         None,
         script=script,
-        held_keys=held_keys,
-        held_buttons=held_buttons,
         joysticks=joysticks,
     )
 
@@ -520,6 +537,12 @@ class ExitArmingTests(unittest.TestCase):
     longer than any settle window used to be and it still must not fire.
     Once released and pressed again, a fresh press must quit promptly --
     "solved" must not mean "Escape stopped working in the gallery".
+
+    Held state here is modelled the way :class:`ScriptedSession` reads it:
+    a KEYDOWN/JOYBUTTONDOWN repeated in every consecutive frame's batch is a
+    hold, not a single seeded flag -- see its docstring for why that
+    distinction is what makes the focus regression below meaningful rather
+    than trivially true.
     """
 
     def run_session(self, script, **kwargs):
@@ -531,13 +554,13 @@ class ExitArmingTests(unittest.TestCase):
     def test_a_key_already_held_at_open_does_not_quit_until_released_and_pressed_again(
         self,
     ) -> None:
-        """Reproduces the client's report directly: Escape is already held
-        (physically down) the instant the session opens, and stays down for
-        far longer than a human reaction time -- standing in for the exact
-        key that just closed the previous game, still under a visitor's
-        finger. It must never quit while that hold continues. Only a
-        genuine release followed by a fresh press may quit, and that must
-        happen immediately, not after some further delay.
+        """Escape is already held (physically down) the instant the session
+        opens, and stays down for far longer than a human reaction time --
+        standing in for the exact key that just closed the previous game,
+        still under a visitor's finger. It must never quit while that hold
+        continues. Only a genuine release followed by a fresh press may
+        quit, and that must happen immediately, not after some further
+        delay.
         """
         held_frames = 40
         script = (
@@ -545,7 +568,7 @@ class ExitArmingTests(unittest.TestCase):
             + [[key_event(pygame.K_ESCAPE, down=False)]]
             + [[key_event(pygame.K_ESCAPE)]]
         )
-        game, outcome = self.run_session(script, held_keys=frozenset({pygame.K_ESCAPE}))
+        game, outcome = self.run_session(script)
         self.assertIs(outcome.action, UiAction.QUIT)
         self.assertEqual(
             game.frames,
@@ -565,11 +588,7 @@ class ExitArmingTests(unittest.TestCase):
             + [[button_up_event(BUTTON_EXIT)]]
             + [[button_event(BUTTON_EXIT)]]
         )
-        game, outcome = self.run_session(
-            script,
-            held_buttons=frozenset({(0, BUTTON_EXIT)}),
-            joysticks=(FakeJoystick(instance_id=0),),
-        )
+        game, outcome = self.run_session(script, joysticks=(FakeJoystick(instance_id=0),))
         self.assertIs(outcome.action, UiAction.QUIT)
         self.assertEqual(
             game.frames,
@@ -578,20 +597,73 @@ class ExitArmingTests(unittest.TestCase):
             "frame of the first fresh press after release",
         )
 
-    def test_a_genuine_escape_quits_on_the_very_first_frame(self) -> None:
+    def test_a_genuine_escape_quits_once_it_has_had_a_chance_to_arm(self) -> None:
         """The overwhelmingly common case -- Escape was not held at all when
-        the session opened -- must arm immediately: nothing here may impose
-        an artificial delay on an ordinary press."""
-        game, outcome = self.run_session([[key_event(pygame.K_ESCAPE)]])
+        the session opened -- must still arm and fire an ordinary press
+        promptly, not be blocked forever by the fix below."""
+        script = [[] for _ in range(20)] + [[key_event(pygame.K_ESCAPE)]]
+        game, outcome = self.run_session(script)
         self.assertIs(outcome.action, UiAction.QUIT)
-        self.assertEqual(game.frames, 1, "an ordinary press must not be delayed")
+        self.assertEqual(game.frames, 21, "an armed, ordinary press must fire immediately")
 
-    def test_a_genuine_button_quits_on_the_very_first_frame(self) -> None:
-        game, outcome = self.run_session(
-            [[button_event(BUTTON_EXIT)]], joysticks=(FakeJoystick(instance_id=0),)
-        )
+    def test_a_genuine_button_quits_once_it_has_had_a_chance_to_arm(self) -> None:
+        script = [[] for _ in range(20)] + [[button_event(BUTTON_EXIT)]]
+        game, outcome = self.run_session(script, joysticks=(FakeJoystick(instance_id=0),))
         self.assertIs(outcome.action, UiAction.QUIT)
-        self.assertEqual(game.frames, 1, "an ordinary press must not be delayed")
+        self.assertEqual(game.frames, 21, "an armed, ordinary press must fire immediately")
+
+    def test_a_key_held_at_open_is_not_armed_by_an_unfocused_first_reading(self) -> None:
+        """The exact failure the client reproduced a second time: the freshly
+        opened window has not gained input focus yet, so it receives no
+        input at all for its first few frames -- not because nothing is
+        held, but because the window has not started receiving input yet.
+        A ``pygame.key.get_pressed()`` fallback that trusts an early "not
+        held" reading arms Escape before the window has ever seen the
+        truth; once real focus arrives moments later and delivers the
+        still-held key's genuine KEYDOWN, that wrongly-armed source fires
+        an immediate, unwanted exit straight out of the gallery. It must
+        not: the fallback must not answer "not held" until it has had a
+        real chance to be right, so the still-held key must stay disarmed
+        straight through the no-input gap and into the frames where the
+        real, still-held key starts arriving -- and only a genuine release
+        may arm it.
+        """
+        unfocused_frames = 5  # no window focus yet: nothing is delivered at all
+        held_frames = 30  # focus has arrived: the still-held key is now visible
+        script = (
+            [[] for _ in range(unfocused_frames)]
+            + [[key_event(pygame.K_ESCAPE)] for _ in range(held_frames)]
+            + [[key_event(pygame.K_ESCAPE, down=False)]]
+            + [[key_event(pygame.K_ESCAPE)]]
+        )
+        game, outcome = self.run_session(script)
+        self.assertIs(outcome.action, UiAction.QUIT)
+        self.assertEqual(
+            game.frames,
+            unfocused_frames + held_frames + 2,
+            "a still-held key must not arm just because the window had not "
+            "gained focus yet when it was (wrongly) sampled as 'not held'",
+        )
+
+    def test_a_button_held_at_open_is_not_armed_by_an_unfocused_first_reading(self) -> None:
+        """The joystick half of the same regression -- and the more
+        important one, since P1 is the control the cabinet actually uses."""
+        unfocused_frames = 5
+        held_frames = 30
+        script = (
+            [[] for _ in range(unfocused_frames)]
+            + [[button_event(BUTTON_EXIT)] for _ in range(held_frames)]
+            + [[button_up_event(BUTTON_EXIT)]]
+            + [[button_event(BUTTON_EXIT)]]
+        )
+        game, outcome = self.run_session(script, joysticks=(FakeJoystick(instance_id=0),))
+        self.assertIs(outcome.action, UiAction.QUIT)
+        self.assertEqual(
+            game.frames,
+            unfocused_frames + held_frames + 2,
+            "a still-held button must not arm just because the window had "
+            "not gained focus yet when it was (wrongly) sampled as 'not held'",
+        )
 
 
 class SdlLifecycleTests(unittest.TestCase):

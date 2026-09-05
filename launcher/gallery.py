@@ -80,6 +80,16 @@ _TOAST_MS = 1600
 #: one never costs a visitor their Play press.
 _LAUNCH_REFRESH_TIMEOUT_MS = 2000
 
+#: How long a session waits, after it opens, before trusting a
+#: ``pygame.key.get_pressed()``/``Joystick.get_button()`` reading of "not
+#: held" enough to arm an exit source on it -- see the docstring on
+#: :meth:`GallerySession._sync_exit_arming` for the failure this guards
+#: against. Comparable to (and no worse than) the settle window this
+#: replaced; a visitor cannot perceive a quarter-second and essentially never
+#: presses Esc/P1 that fast after the gallery appears, so the common case
+#: still arms -- and fires -- promptly.
+_EXIT_ARM_FALLBACK_GRACE_MS = 250
+
 
 def _never() -> bool:
     """Default shutdown predicate: a session that is never asked to stop."""
@@ -189,9 +199,12 @@ class GallerySession:
 
         # A previous session (or the child game that just exited) can leave
         # events sitting in SDL's queue; none of them describe *this* session
-        # and must never be read as an immediate command -- see item 1.
+        # and must never be read as an immediate command -- see item 1. Note
+        # that no arming sync happens here: at elapsed_ms == 0 the fallback
+        # grace (_EXIT_ARM_FALLBACK_GRACE_MS) has not been met, so it would
+        # be a no-op anyway -- see :meth:`_sync_exit_arming`. Arming starts
+        # from the loop's first frame.
         pygame.event.clear()
-        self._sync_exit_arming()
 
     def _release_sdl(self) -> None:
         """Give the display and every joystick back to the operating system.
@@ -268,8 +281,8 @@ class GallerySession:
         self.navigation.axes.attach(instance_id)
         # Disarmed by default, same as every exit-mapped key -- see item 1
         # and the attribute docstring in __init__. _sync_exit_arming (called
-        # right after this loop in _open_display, and every frame after)
-        # arms it immediately if the button turns out not to be held.
+        # every frame in the loop, once its fallback grace period has
+        # passed) arms it once the button turns out not to be held.
         self._disarmed_exit_buttons.add((instance_id, BUTTON_EXIT))
         _log.info("joystick attached: %s (instance %s)", stick.get_name(), instance_id)
 
@@ -294,26 +307,41 @@ class GallerySession:
             return False
         return button < stick.get_numbuttons() and bool(stick.get_button(button))
 
-    def _sync_exit_arming(self) -> None:
+    def _sync_exit_arming(self, elapsed_ms: int) -> None:
         """Arm every exit-mapped key/button not yet confirmed released.
 
         This is the fallback half of arm-on-release (item 1): the KEYUP/
-        JOYBUTTONUP handling in the loop is the fast, common path, and arms
-        the instant SDL reports a release. This exists for when that event
-        never arrives -- for example a window losing input focus while the
-        key is up, which can mean SDL never emits the KEYUP at all -- and,
-        just as importantly, for the very first frame of a source that was
-        never held in the first place: the overwhelmingly common case, and
-        one that must arm immediately, not after a fixed delay.
+        JOYBUTTONUP handling in the loop is the fast, primary path, and arms
+        the instant SDL reports a release -- that stays exactly as-is and is
+        trusted immediately, at any time, because a queued release event is
+        real evidence.
 
-        ``pygame.key.get_pressed()`` is populated by SDL's normal event
-        pumping, not read independently of it -- events are pumped here
-        before any of it is sampled, unlike the single early read this
-        replaced, which ran before the new window had necessarily gained
-        input focus and could report nothing held even while a key was
-        genuinely still down.
+        This fallback exists for the case that event never arrives -- most
+        importantly, arming a source that was never held in the first place
+        (the overwhelmingly common case, which has no release to wait for at
+        all) but also a window that loses input focus while a key is up, so
+        SDL never emits the KEYUP. Reaching for ``pygame.key.get_pressed()``/
+        ``Joystick.get_button()`` here looks like it settles the question
+        directly, but a regression proved it does not: immediately after
+        ``pygame.display.set_mode()`` the freshly created window has not
+        necessarily *gained input focus* yet, and until it does, SDL's
+        keyboard state array reads as all-zero -- not because nothing is
+        held, but because the window has not started receiving input at
+        all. Pumping events first does not fix this; there is simply
+        nothing to pump yet. A still-held Esc/P1 was therefore read as
+        "released", armed on the spot, and fired for real the moment focus
+        actually arrived and delivered the key's genuine, still-held state.
+
+        So this only ever answers "not held" once :data:`_EXIT_ARM_FALLBACK_GRACE_MS`
+        has passed since the session opened -- comfortably past the point a
+        freshly created window has gained focus and its input state means
+        what it says. Before that, this is a no-op and only the KEYUP/
+        JOYBUTTONUP fast path above can arm anything, exactly as if nothing
+        were held yet -- which is the safe assumption until proven otherwise.
         """
         if not self._disarmed_exit_keys and not self._disarmed_exit_buttons:
+            return
+        if elapsed_ms < _EXIT_ARM_FALLBACK_GRACE_MS:
             return
         pygame.event.pump()
         for key in list(self._disarmed_exit_keys):
@@ -381,7 +409,7 @@ class GallerySession:
             elapsed_ms += delta_ms
             focus_ms += delta_ms
             self._absorb_sync()
-            self._sync_exit_arming()
+            self._sync_exit_arming(elapsed_ms)
 
             if pending_launch is not None:
                 outcome, refusal = self._settle_launch(pending_launch, mode, elapsed_ms)

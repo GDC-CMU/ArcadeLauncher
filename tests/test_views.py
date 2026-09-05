@@ -257,6 +257,83 @@ class GridScalingTests(HeadlessCase):
                         self.assertTrue(surface_rect.contains(rect), rect)
 
 
+class GridPartialPageCenteringTests(unittest.TestCase):
+    """A page short of a full 3x2 board -- the last page of a catalogue whose
+    size isn't a multiple of six, or a short final row on an otherwise full
+    page -- must read as a deliberately centred composition, not a card (or
+    a short row) stranded in the top-left corner with the rest of the screen
+    empty. This is a live regression: a seventh game landed exactly here.
+    """
+
+    #: A pixel or two of slack for the floor-division roundings baked into
+    #: CARD_WIDTH/CARD_HEIGHT -- the centring itself must still be exact to
+    #: within that same rounding, not merely "somewhere in the middle".
+    TOLERANCE = 2
+
+    @staticmethod
+    def _content_rect() -> pygame.Rect:
+        return pygame.Rect(
+            grid.CARD_MARGIN_X,
+            grid.CARD_TOP,
+            SCREEN_WIDTH - grid.CARD_MARGIN_X * 2,
+            SCREEN_HEIGHT - grid.CARD_TOP - grid.CARD_BOTTOM_MARGIN,
+        )
+
+    @staticmethod
+    def _bbox(rects: list[pygame.Rect]) -> pygame.Rect:
+        return rects[0].unionall(rects[1:]) if len(rects) > 1 else rects[0].copy()
+
+    def test_a_full_page_renders_exactly_as_before(self) -> None:
+        """A full page must be pixel-for-pixel what the old unconditional
+        card_rect produced -- the centring offset for it must floor to zero,
+        not merely look close."""
+        for slot in range(grid.PAGE_SIZE):
+            with self.subTest(slot=slot):
+                self.assertEqual(
+                    GridView.page_card_rect(slot, grid.PAGE_SIZE),
+                    GridView.card_rect(slot),
+                )
+
+    def test_partial_pages_are_centred_on_both_axes(self) -> None:
+        content = self._content_rect()
+        for count_on_page in range(1, grid.PAGE_SIZE):
+            with self.subTest(count_on_page=count_on_page):
+                rects = [
+                    GridView.page_card_rect(slot, count_on_page)
+                    for slot in range(count_on_page)
+                ]
+                bbox = self._bbox(rects)
+                self.assertAlmostEqual(bbox.centerx, content.centerx, delta=self.TOLERANCE)
+                self.assertAlmostEqual(bbox.centery, content.centery, delta=self.TOLERANCE)
+                surface_rect = pygame.Rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT)
+                for rect in rects:
+                    self.assertTrue(surface_rect.contains(rect), rect)
+
+    def test_a_full_row_is_untouched_while_a_short_row_is_not(self) -> None:
+        """4 cards: row 0 is a full row of 3 (unchanged), row 1 is a single
+        stray card (centred), and it must be centred *under the full row*
+        rather than at the content area's own centre coincidentally."""
+        rects = [GridView.page_card_rect(slot, 4) for slot in range(4)]
+        row0, row1 = rects[:3], rects[3:]
+        self.assertEqual(row0, [GridView.card_rect(slot) for slot in range(3)])
+        row0_bbox = self._bbox(row0)
+        row1_bbox = self._bbox(row1)
+        self.assertAlmostEqual(row0_bbox.centerx, row1_bbox.centerx, delta=self.TOLERANCE)
+
+    def test_a_short_final_row_is_centred_under_a_full_row(self) -> None:
+        """5 cards: row 0 is a full row of 3, row 1 is a short row of 2 --
+        row 1 must be centred under row 0 rather than hugging the left
+        margin under it."""
+        rects = [GridView.page_card_rect(slot, 5) for slot in range(5)]
+        row0, row1 = rects[:3], rects[3:]
+        row0_bbox = self._bbox(row0)
+        row1_bbox = self._bbox(row1)
+        self.assertAlmostEqual(row0_bbox.centerx, row1_bbox.centerx, delta=self.TOLERANCE)
+        self.assertGreater(row1.__len__(), 0)
+        # The short row must not simply repeat the full row's left edge.
+        self.assertGreater(row1[0].left, row0[0].left)
+
+
 class LinearNavigationTests(unittest.TestCase):
     """Carousel and cover flow are one long wrapping row."""
 

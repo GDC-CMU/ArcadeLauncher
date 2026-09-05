@@ -304,9 +304,15 @@ The rules that follow from this:
 
 ## Screenshots
 
-Three deliberately different compositions of the same six games. All are
-rendered from the real view code by `python -m tools.generate_previews`, at the
-cabinet's exact 800×600, and a test fails if they drift out of date.
+Three deliberately different compositions of the same six games, under one
+identical header. All are rendered from the real view code by `python -m
+tools.generate_previews`, at the cabinet's exact 800×600, and a test fails if
+they drift out of date.
+
+The header -- logo, wordmark, subtitle and the mode chip -- is drawn by a
+single shared component and never changes as you cycle views: same wording,
+same size, same position. Everything that makes the three modes look
+different lives in the content area below it.
 
 They show the shipped `data/games.json` exactly as a healthy cabinet would --
 one playable game and five in development. Availability lives entirely on the

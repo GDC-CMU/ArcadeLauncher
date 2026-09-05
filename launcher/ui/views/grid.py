@@ -1,9 +1,9 @@
 """Grid -- the cabinet board.
 
-Composition: a full-width marquee band across the top and a board of equal
-cards beneath it, sized to fill the freed space now that the permanent status
-strip and control legend are gone. Everything on the current page is visible
-at once, and the stick moves in two real dimensions.
+Composition: the shared marquee header (identical across all three views) and
+a board of equal cards beneath it, sized to fill the freed space now that the
+permanent status strip and control legend are gone. Everything on the current
+page is visible at once, and the stick moves in two real dimensions.
 
 The board is a fixed 3x2 shape, so it *paginates* rather than growing without
 bound: a catalogue of 20 games is four pages of up to six, not twenty cards
@@ -23,16 +23,15 @@ from ...input_state import Direction
 from ...viewmodes import ViewMode
 from .. import SCREEN_HEIGHT, SCREEN_WIDTH
 from ..components import (
+    HEADER_RECT,
     RenderContext,
     card_cover,
-    draw_marquee,
-    draw_mode_chip,
+    draw_gallery_header,
     draw_position_dots,
     draw_toast,
 )
 from ..effects import ease_out_cubic
 from ..pygame_runtime import pygame
-from ..theme import PALETTE, shade
 from ..viewmodel import GalleryFrame
 from .base import GalleryView, register
 
@@ -42,14 +41,13 @@ COLUMNS = 3
 ROWS = 2
 PAGE_SIZE = COLUMNS * ROWS
 
-HEADER = pygame.Rect(0, 0, SCREEN_WIDTH, 92)
-BANNER = pygame.Rect(24, 100, SCREEN_WIDTH - 48, 40)
+BANNER = pygame.Rect(24, HEADER_RECT.bottom + 8, SCREEN_WIDTH - 48, 40)
 PAGE_DOTS_Y = SCREEN_HEIGHT - 20
 
 CARD_MARGIN_X = 30
 CARD_GAP_X = 20
 CARD_GAP_Y = 18
-CARD_TOP = HEADER.bottom + 22
+CARD_TOP = BANNER.bottom + 14
 CARD_BOTTOM_MARGIN = 30
 CARD_WIDTH = (SCREEN_WIDTH - CARD_MARGIN_X * 2 - CARD_GAP_X * (COLUMNS - 1)) // COLUMNS
 CARD_HEIGHT = (SCREEN_HEIGHT - CARD_TOP - CARD_BOTTOM_MARGIN - CARD_GAP_Y * (ROWS - 1)) // ROWS
@@ -91,7 +89,7 @@ class GridView(GalleryView):
     def draw(
         self, surface: pygame.Surface, ctx: RenderContext, frame: GalleryFrame
     ) -> None:
-        self._draw_header(surface, ctx, frame)
+        draw_gallery_header(surface, ctx, frame)
         self.draw_banner(surface, ctx, BANNER, frame)
 
         pages = max(1, math.ceil(frame.count / PAGE_SIZE))
@@ -123,36 +121,6 @@ class GridView(GalleryView):
             draw_toast(
                 surface, ctx, (SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2), frame.toast, frame.time_ms
             )
-
-    def _draw_header(
-        self, surface: pygame.Surface, ctx: RenderContext, frame: GalleryFrame
-    ) -> None:
-        pygame.draw.rect(surface, shade(PALETTE["night"], 1.12), HEADER)
-        pygame.draw.rect(
-            surface,
-            PALETTE["cmu_red"],
-            pygame.Rect(0, HEADER.bottom - 4, SCREEN_WIDTH, 4),
-        )
-        pygame.draw.rect(
-            surface,
-            PALETTE["warm_amber"],
-            pygame.Rect(0, HEADER.bottom - 4, 240, 4),
-        )
-        draw_marquee(
-            surface,
-            ctx,
-            pygame.Rect(HEADER.left + 26, HEADER.top, 520, HEADER.height - 4),
-            logo_height=56,
-            title_scale=3,
-        )
-        draw_mode_chip(
-            surface,
-            ctx,
-            (SCREEN_WIDTH - 26, HEADER.top + 26),
-            frame.view_mode,
-            position=frame.selected_index + 1,
-            count=frame.count,
-        )
 
 
 register(GridView())

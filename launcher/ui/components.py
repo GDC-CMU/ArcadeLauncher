@@ -28,10 +28,13 @@ from .theme import (
     shade,
     with_alpha,
 )
-from .viewmodel import Card, Toast
+from .viewmodel import Card, GalleryFrame, Toast
 
 __all__ = [
     "RenderContext",
+    "HEADER_HEIGHT",
+    "HEADER_RECT",
+    "draw_gallery_header",
     "draw_marquee",
     "draw_mode_chip",
     "draw_status_badge",
@@ -42,6 +45,13 @@ __all__ = [
 ]
 
 _log = logging.getLogger(__name__)
+
+#: Shared header band, identical across all three views (item B). Cycling
+#: views must leave this fixed -- wording, logo size, type scale and position
+#: -- with every visual difference between the modes coming from the content
+#: area below it instead.
+HEADER_HEIGHT = 76
+HEADER_RECT = pygame.Rect(0, 0, SCREEN_WIDTH, HEADER_HEIGHT)
 
 
 @dataclass(slots=True)
@@ -170,6 +180,47 @@ def draw_mode_chip(
     panel(surface, box, PALETTE["panel"], PALETTE["deep_cyan"], radius=4)
     surface.blit(text, text.get_rect(center=box.center))
     return box
+
+
+def draw_gallery_header(
+    surface: pygame.Surface, ctx: RenderContext, frame: GalleryFrame
+) -> pygame.Rect:
+    """Draw the one header every view shares, byte-for-byte identical.
+
+    A visitor cycling Grid -> Carousel -> Cover Flow used to see the brand
+    mark change size, wording and position on every press -- Grid's full
+    band with a subtitle, Carousel's smaller band without one, and Cover
+    Flow's own inline logo-plus-text reading "GDC ARCADE" instead of "GAME
+    DEV CLUB". This is the single place that draws it now: same rect, same
+    logo height, same type scale, same mode chip. Differentiation between
+    the three modes comes entirely from the content area below
+    :data:`HEADER_RECT`, never from this band moving or resizing.
+    """
+    rect = HEADER_RECT
+    pygame.draw.rect(surface, shade(PALETTE["night"], 1.12), rect)
+    pygame.draw.rect(
+        surface, PALETTE["cmu_red"], pygame.Rect(0, rect.bottom - 4, SCREEN_WIDTH, 4)
+    )
+    pygame.draw.rect(
+        surface, PALETTE["warm_amber"], pygame.Rect(0, rect.bottom - 4, 240, 4)
+    )
+    draw_marquee(
+        surface,
+        ctx,
+        pygame.Rect(rect.left + 26, rect.top, 520, rect.height - 4),
+        logo_height=46,
+        title_scale=3,
+    )
+    draw_mode_chip(
+        surface,
+        ctx,
+        (SCREEN_WIDTH - 26, rect.centery),
+        frame.view_mode,
+        position=frame.selected_index + 1,
+        count=frame.count,
+        align="midright",
+    )
+    return rect
 
 
 # ---------------------------------------------------------------------------

@@ -13,12 +13,15 @@ from launcher.input_state import Direction
 from launcher.manifest import CardArt, GameEntry, Manifest, Runtime, load_manifest
 from launcher.status import GameState, GameStatus, Notice
 from launcher.ui import SCREEN_HEIGHT, SCREEN_SIZE, SCREEN_WIDTH
+from launcher.ui.components import HEADER_HEIGHT, HEADER_RECT
 from launcher.ui.pygame_runtime import pygame
 from launcher.ui.scene import Renderer
 from launcher.ui.surfaces import SurfaceCache
 from launcher.ui.theme import PALETTE, FontBook, PixelFont, mix, shade
 from launcher.ui.viewmodel import GalleryFrame, Toast
 from launcher.ui.views import VIEWS, view_for
+from launcher.ui.views import carousel, coverflow, grid
+from launcher.ui.views.coverflow import MAX_DEPTH, CoverFlowView
 from launcher.ui.views.grid import GridView
 from launcher.viewmodes import ViewMode
 
@@ -426,6 +429,114 @@ class StatusDistinguishabilityTests(HeadlessCase):
     def test_each_status_has_its_own_badge_label(self) -> None:
         labels = {status: status.value for status in GameStatus}
         self.assertEqual(len(set(labels.values())), len(GameStatus))
+
+
+class SharedHeaderTests(HeadlessCase):
+    """Item B: the header must be a fixed anchor, identical in every view.
+
+    A visitor cycling views used to see the brand mark change size, wording
+    and position -- Grid's full band with a subtitle, Carousel's smaller band
+    without one, Cover Flow's own inline "GDC ARCADE" text instead of "GAME
+    DEV CLUB". These pin that all three now draw the exact same rect at the
+    exact same pixels, so a future edit to one view's chrome can't quietly
+    reintroduce the drift.
+    """
+
+    #: The brand portion of the header, left of where the mode chip starts.
+    BRAND_AREA = pygame.Rect(0, 0, 560, HEADER_HEIGHT)
+
+    def test_every_view_shares_the_same_header_rect_object(self) -> None:
+        """All three modules must reference one constant, not their own copy."""
+        self.assertIs(grid.HEADER_RECT, HEADER_RECT)
+        self.assertIs(carousel.HEADER_RECT, HEADER_RECT)
+        self.assertIs(coverflow.HEADER_RECT, HEADER_RECT)
+
+    def test_the_brand_mark_is_pixel_identical_across_every_mode(self) -> None:
+        """Same logo, same wording, same size, same position -- every mode.
+
+        This is the direct regression guard for the reported bug: Grid's
+        subtitle-bearing band, Carousel's smaller one and Cover Flow's own
+        inline "GDC ARCADE" text used to all draw something different here.
+        Cropped left of the mode chip -- the one part of the header that is
+        *supposed* to differ, since it names the active view -- everything
+        else must render byte-identical no matter which mode is on screen.
+        """
+        payloads = {}
+        for mode in ViewMode:
+            built = frame(mode, index=2, time_ms=1400)
+            surface = self.renderer.render(built)
+            crop = surface.subsurface(self.BRAND_AREA)
+            payloads[mode] = pygame.image.tostring(crop, "RGB")
+        distinct = set(payloads.values())
+        self.assertEqual(
+            len(distinct),
+            1,
+            "the brand mark differs between view modes -- it must not move, "
+            "resize or reword when the visitor cycles views",
+        )
+
+
+class CoverFlowSymmetryTests(unittest.TestCase):
+    """Item A: the fan must be symmetric for any game count.
+
+    ``wrapped_distance`` has an ambiguous case at exactly half the catalogue
+    around from the selection -- the diametrically opposite card is equally
+    close either way -- and resolving that tie to a fixed side is what used
+    to draw three cards on the left and two on the right for six games. The
+    fix caps the window so that tie is never entered; these tests exercise
+    every count named in the brief, at rest and mid-scroll.
+    """
+
+    COUNTS = (1, 2, 3, 4, 5, 6, 7, 12, 20)
+
+    def test_left_and_right_counts_are_always_equal(self) -> None:
+        for count in self.COUNTS:
+            for scroll in (0.0, 0.35, 1.0, count - 0.5):
+                if scroll < 0 or scroll >= count:
+                    continue
+                with self.subTest(count=count, scroll=scroll):
+                    slots = CoverFlowView.visible_slots(scroll, count)
+                    left = sum(1 for _, distance in slots if distance < -1e-9)
+                    right = sum(1 for _, distance in slots if distance > 1e-9)
+                    self.assertEqual(
+                        left, right, f"lopsided fan at count={count} scroll={scroll}"
+                    )
+
+    def test_no_index_is_ever_drawn_twice(self) -> None:
+        for count in self.COUNTS:
+            for scroll in (0.0, 0.35, 1.0, count - 0.5):
+                if scroll < 0 or scroll >= count:
+                    continue
+                with self.subTest(count=count, scroll=scroll):
+                    slots = CoverFlowView.visible_slots(scroll, count)
+                    indices = [index for index, _ in slots]
+                    self.assertEqual(
+                        len(indices), len(set(indices)), "a card rendered twice"
+                    )
+
+    def test_small_counts_have_no_gap_or_duplicate(self) -> None:
+        """1 or 2 games: just the hero, cleanly -- never a lone empty side."""
+        for count in (1, 2):
+            with self.subTest(count=count):
+                slots = CoverFlowView.visible_slots(0.0, count)
+                self.assertEqual([index for index, _ in slots], [0])
+
+    def test_the_window_never_reaches_the_ambiguous_exact_half(self) -> None:
+        """The cap must always stay strictly under count/2 for even counts."""
+        for count in (2, 4, 6, 8, 20):
+            with self.subTest(count=count):
+                slots = CoverFlowView.visible_slots(0.0, count)
+                for _, distance in slots:
+                    self.assertLess(abs(distance), count / 2)
+
+    def test_odd_counts_show_every_other_card(self) -> None:
+        """Odd counts have no exact-half tie, so nothing needs hiding."""
+        for count in (3, 5, 7):
+            with self.subTest(count=count):
+                slots = CoverFlowView.visible_slots(0.0, count)
+                # +1 for the hero itself (distance 0), included in every slot list.
+                expected = 2 * min(MAX_DEPTH, (count - 1) // 2) + 1
+                self.assertEqual(len(slots), expected)
 
 
 if __name__ == "__main__":  # pragma: no cover

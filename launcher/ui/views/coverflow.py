@@ -1,8 +1,9 @@
 """Cover Flow -- a pseudo-3D wall of covers receding towards a horizon.
 
-Composition: no top band at all.  The covers own the screen, angled away from
-the viewer on both sides, standing on a reflective floor with a glowing
-horizon.  The selected title sits below the wall in large type.
+Composition: the shared marquee header (identical across all three views),
+then the covers own the rest of the screen -- angled away from the viewer on
+both sides, standing on a reflective floor with a glowing horizon. The
+selected title sits below the wall in large type.
 
 The perspective is a genuine per-column trapezoid transform, not a plain
 rescale: the edge of a card facing the viewer stays tall while the far edge is
@@ -14,6 +15,14 @@ than the integer selection -- so the whole wall glides; only the *depth slot*
 a card renders at (its size and skew) still steps between a few fixed values,
 which is what keeps the perspective transform built at most once per slot
 instead of every frame.
+
+The fan is symmetric for *any* game count -- see :meth:`CoverFlowView.
+visible_slots`. An even count has one card sitting exactly opposite the
+selection, equidistant either way around the wrap; naively resolving that tie
+always the same direction is what used to draw three cards on one side and
+two on the other for a six-game catalogue. That card is simply left out of
+the window at rest instead, and slides into view on its own once scrolling
+carries it within range.
 """
 
 from __future__ import annotations
@@ -24,8 +33,10 @@ from ...status import GameStatus
 from ...viewmodes import ViewMode
 from .. import SCREEN_WIDTH
 from ..components import (
+    HEADER_RECT,
     RenderContext,
     card_cover,
+    draw_gallery_header,
     draw_position_dots,
     draw_status_badge,
     draw_toast,
@@ -39,8 +50,8 @@ from .base import GalleryView, register
 __all__ = ["CoverFlowView"]
 
 HERO_SIZE = (208, 244)
-STAGE_CENTRE_Y = 250
-HORIZON_Y = 372
+HORIZON_Y = HEADER_RECT.bottom + 74 + HERO_SIZE[1]
+STAGE_CENTRE_Y = (HEADER_RECT.bottom + HORIZON_Y) // 2
 REFLECTION_HEIGHT = 34
 
 #: Deepest slot still drawn.  Anything further is off the wall entirely.
@@ -98,7 +109,7 @@ class CoverFlowView(GalleryView):
     def draw(
         self, surface: pygame.Surface, ctx: RenderContext, frame: GalleryFrame
     ) -> None:
-        self._draw_chrome(surface, ctx, frame)
+        draw_gallery_header(surface, ctx, frame)
         self._draw_floor(surface, ctx)
         self._draw_wall(surface, ctx, frame)
         self._draw_scrim(surface, ctx)
@@ -113,31 +124,35 @@ class CoverFlowView(GalleryView):
             )
 
     # ------------------------------------------------------------------
-    def _draw_chrome(
-        self, surface: pygame.Surface, ctx: RenderContext, frame: GalleryFrame
-    ) -> None:
-        """No header band -- just a small wordmark and the position counter."""
-        logo = ctx.logo(36)
-        left = 26
-        if logo is not None:
-            surface.blit(logo, logo.get_rect(midleft=(left, 30)))
-            left += logo.get_width() + 12
-        ctx.pixel.draw(
-            surface, "GDC ARCADE", (left, 30), 2, PALETTE["bone"], anchor="midleft"
-        )
+    @staticmethod
+    def visible_slots(scroll: float, count: int) -> list[tuple[int, float]]:
+        """Every ``(index, signed distance)`` the wall draws, farthest first.
 
-        # The selected game's place in the catalogue, never the view-mode
-        # slot -- "COVER FLOW 4/6" is a number a visitor can check against the
-        # row of cards; "2/3" (which of the three view modes) is not.
-        label = f"{frame.view_mode.label}  {frame.selected_index + 1}/{frame.count}"
-        ctx.pixel.draw(
-            surface,
-            label,
-            (SCREEN_WIDTH - 26, 30),
-            2,
-            PALETTE["electric_cyan"],
-            anchor="midright",
-        )
+        Symmetric by construction: the cap is the largest N for which N
+        cards fit on *each* side without ever reaching the exact opposite of
+        the selection, so an even count's ambiguous, exactly-half-way card
+        is never arbitrarily assigned a side -- it simply is not part of the
+        window at rest. Because the cap is compared against the
+        *continuous* scroll-relative distance rather than the integer
+        selection, that card slides into the window on its own the moment
+        scrolling carries it within range, instead of only ever resolving
+        discretely once it becomes the new selection.
+
+        Also what keeps a card from ever being drawn twice: every index is
+        visited exactly once, so there is no direction-and-distance pair
+        that can reach the same index from both sides.
+        """
+        if count <= 0:
+            return []
+        cap = min(MAX_DEPTH, (count - 1) // 2)
+        slots: list[tuple[int, float]] = []
+        for index in range(count):
+            distance = wrapped_distance(index, scroll, count)
+            if abs(distance) > cap + 1e-9:
+                continue
+            slots.append((index, distance))
+        slots.sort(key=lambda item: -abs(item[1]))
+        return slots
 
     def _draw_floor(self, surface: pygame.Surface, ctx: RenderContext) -> None:
         glow = ctx.cache.get(
@@ -180,20 +195,9 @@ class CoverFlowView(GalleryView):
     def _draw_wall(
         self, surface: pygame.Surface, ctx: RenderContext, frame: GalleryFrame
     ) -> None:
-        # Every card's screen position comes from its continuous distance to
-        # the smoothed scroll position, farthest first so nearer cards paint
-        # on top -- the same shortest-path, arbitrary-count-safe approach as
-        # the carousel. Only the depth *slot* used to pick the cached, skewed
-        # surface still snaps to the nearest whole step.
-        visible = []
-        for index in range(frame.count):
-            distance = wrapped_distance(index, frame.scroll, frame.count)
-            if abs(distance) > MAX_DEPTH + 0.001:
-                continue
-            visible.append((abs(distance), distance, index))
-        visible.sort(key=lambda item: -item[0])
-
-        for magnitude, distance, index in visible:
+        # Farthest first so nearer cards paint on top.
+        for index, distance in self.visible_slots(frame.scroll, frame.count):
+            magnitude = abs(distance)
             slot_depth = min(MAX_DEPTH, round(magnitude))
             offset = lerp_stops(magnitude, OFFSET_STOPS)
             sign = 0.0 if distance == 0 else (1.0 if distance > 0 else -1.0)
@@ -292,12 +296,13 @@ class CoverFlowView(GalleryView):
         card = frame.selected
         accent = STATUS_COLORS[card.status]
 
+        title_y = HORIZON_Y + 50
         title = card.title.upper()
         scale = 4
         while scale > 2 and ctx.pixel.measure(title, scale)[0] > SCREEN_WIDTH - 96:
             scale -= 1
         ctx.pixel.draw(
-            surface, title, (SCREEN_WIDTH // 2, 422), scale, PALETTE["bone"], anchor="midtop"
+            surface, title, (SCREEN_WIDTH // 2, title_y), scale, PALETTE["bone"], anchor="midtop"
         )
 
         underline_width = ctx.pixel.measure(title, scale)[0]
@@ -305,14 +310,17 @@ class CoverFlowView(GalleryView):
             surface,
             shade(accent, 1.1),
             pygame.Rect(
-                SCREEN_WIDTH // 2 - underline_width // 2, 422 + scale * 7 + 6, underline_width, 2
+                SCREEN_WIDTH // 2 - underline_width // 2,
+                title_y + scale * 7 + 6,
+                underline_width,
+                2,
             ),
         )
 
         draw_status_badge(
             surface,
             ctx,
-            (SCREEN_WIDTH // 2, 468),
+            (SCREEN_WIDTH // 2, HORIZON_Y + 96),
             card.status,
             align="center",
             scale=1,
@@ -329,7 +337,9 @@ class CoverFlowView(GalleryView):
         lines = ctx.fonts.wrap(line, "body", SCREEN_WIDTH - 140, max_lines=2)
         for offset, wrapped in enumerate(lines):
             text = ctx.fonts.render(wrapped, "body", colour)
-            surface.blit(text, text.get_rect(midtop=(SCREEN_WIDTH // 2, 494 + offset * 23)))
+            surface.blit(
+                text, text.get_rect(midtop=(SCREEN_WIDTH // 2, HORIZON_Y + 122 + offset * 23))
+            )
 
 
 register(CoverFlowView())

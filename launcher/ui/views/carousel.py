@@ -1,9 +1,9 @@
 """Carousel -- one spotlit cover with a large information panel.
 
-Composition: a slim header, a stage where the selected cover is large and its
-neighbours bleed in from both edges, a run of position dots, and a full-width
-information panel carrying the title, badge and description at a size that
-reads across a room.
+Composition: the shared marquee header (identical across all three views), a
+stage where the selected cover is large and its neighbours bleed in from both
+edges, a run of position dots, and a full-width information panel carrying
+the title, badge and description at a size that reads across a room.
 """
 
 from __future__ import annotations
@@ -14,10 +14,10 @@ from ...status import GameStatus
 from ...viewmodes import ViewMode
 from .. import SCREEN_WIDTH
 from ..components import (
+    HEADER_RECT,
     RenderContext,
     card_cover,
-    draw_marquee,
-    draw_mode_chip,
+    draw_gallery_header,
     draw_position_dots,
     draw_status_badge,
     draw_toast,
@@ -30,11 +30,10 @@ from .base import GalleryView, register
 
 __all__ = ["CarouselView"]
 
-HEADER = pygame.Rect(0, 0, SCREEN_WIDTH, 66)
-BANNER = pygame.Rect(24, 72, SCREEN_WIDTH - 48, 40)
-STAGE = pygame.Rect(0, 120, SCREEN_WIDTH, 300)
-DOTS_Y = 434
-INFO = pygame.Rect(36, 452, SCREEN_WIDTH - 72, 132)
+BANNER = pygame.Rect(24, HEADER_RECT.bottom + 6, SCREEN_WIDTH - 48, 40)
+STAGE = pygame.Rect(0, BANNER.bottom + 8, SCREEN_WIDTH, 300)
+DOTS_Y = STAGE.bottom + 14
+INFO = pygame.Rect(36, DOTS_Y + 18, SCREEN_WIDTH - 72, 122)
 
 HERO_SIZE = (224, 248)
 #: Continuous (distance, value) stops the *position* lerps between -- see
@@ -60,7 +59,7 @@ class CarouselView(GalleryView):
     def draw(
         self, surface: pygame.Surface, ctx: RenderContext, frame: GalleryFrame
     ) -> None:
-        self._draw_header(surface, ctx, frame)
+        draw_gallery_header(surface, ctx, frame)
         self.draw_banner(surface, ctx, BANNER, frame)
         self._draw_stage(surface, ctx, frame)
         draw_position_dots(
@@ -72,34 +71,6 @@ class CarouselView(GalleryView):
             draw_toast(surface, ctx, (SCREEN_WIDTH // 2, STAGE.centery), frame.toast, frame.time_ms)
 
     # ------------------------------------------------------------------
-    def _draw_header(
-        self, surface: pygame.Surface, ctx: RenderContext, frame: GalleryFrame
-    ) -> None:
-        pygame.draw.rect(surface, shade(PALETTE["night"], 1.08), HEADER)
-        pygame.draw.line(
-            surface,
-            PALETTE["deep_cyan"],
-            (0, HEADER.bottom - 1),
-            (SCREEN_WIDTH, HEADER.bottom - 1),
-            2,
-        )
-        draw_marquee(
-            surface,
-            ctx,
-            pygame.Rect(24, HEADER.top, 460, HEADER.height),
-            logo_height=42,
-            title_scale=2,
-            show_subtitle=False,
-        )
-        draw_mode_chip(
-            surface,
-            ctx,
-            (SCREEN_WIDTH - 24, HEADER.top + 16),
-            frame.view_mode,
-            position=frame.selected_index + 1,
-            count=frame.count,
-        )
-
     def _draw_stage(
         self, surface: pygame.Surface, ctx: RenderContext, frame: GalleryFrame
     ) -> None:

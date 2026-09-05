@@ -10,7 +10,7 @@ import support  # noqa: F401 - pins SDL to the dummy drivers before pygame loads
 import unittest
 
 from launcher.input_state import Direction
-from launcher.manifest import load_manifest
+from launcher.manifest import CardArt, GameEntry, Manifest, Runtime, load_manifest
 from launcher.status import GameState, GameStatus, Notice
 from launcher.ui import SCREEN_HEIGHT, SCREEN_SIZE, SCREEN_WIDTH
 from launcher.ui.pygame_runtime import pygame
@@ -18,11 +18,32 @@ from launcher.ui.scene import Renderer
 from launcher.ui.surfaces import SurfaceCache
 from launcher.ui.theme import PALETTE, FontBook, PixelFont, mix, shade
 from launcher.ui.viewmodel import GalleryFrame, Toast
-from launcher.ui.views import SUMMARY_BUCKETS, VIEWS, view_for
+from launcher.ui.views import VIEWS, view_for
 from launcher.ui.views.grid import GridView
 from launcher.viewmodes import ViewMode
 
 MANIFEST = load_manifest()
+
+
+def synthetic_manifest(count: int) -> Manifest:
+    """A manifest of *count* coming-soon games, for arbitrary-count tests.
+
+    Bypasses JSON validation (as :func:`tests.support.entry` does) so a test
+    can ask for catalogue sizes -- 1, 2, 12, 20 -- the shipped manifest does
+    not have, without inventing a fake ``data/games.json``.
+    """
+    games = tuple(
+        GameEntry(
+            id=f"game-{index}",
+            title=f"Game {index}",
+            description="Synthetic entry for a navigation/layout test.",
+            runtime=Runtime.PYTHON,
+            launchable=False,
+            art=CardArt(motif="duel", palette=("cmu_red", "warm_amber", "ink"), seed=index),
+        )
+        for index in range(count)
+    )
+    return Manifest(version=1, games=games)
 
 
 def all_states(status: GameStatus = GameStatus.READY) -> dict[str, GameState]:
@@ -119,10 +140,6 @@ class RenderTests(HeadlessCase):
                 built = frame(mode, 1, notice=notice, toast=toast, time_ms=200)
                 self.assertEqual(self.renderer.render(built).get_size(), SCREEN_SIZE)
 
-    def test_syncing_banner_renders(self) -> None:
-        built = frame(ViewMode.CAROUSEL, 0, syncing=True)
-        self.assertEqual(self.renderer.render(built).get_size(), SCREEN_SIZE)
-
     def test_frames_are_not_blank(self) -> None:
         """A black rectangle would technically 'render'; make sure it doesn't."""
         for mode in ViewMode:
@@ -150,7 +167,14 @@ def _logo_path():
 
 
 class GridNavigationTests(unittest.TestCase):
-    """The grid is the only mode with genuine two-dimensional movement."""
+    """The grid is the only mode with genuine two-dimensional movement.
+
+    Navigation flows in reading order across the *whole* catalogue -- item 4
+    -- so it scales to any manifest size instead of a hard-coded 3x2 board.
+    Crossing a row or page edge continues onto the next slot rather than
+    wrapping back to the start of the same row, which is what makes a single
+    rule reach every card whether the catalogue holds 1 game or 20.
+    """
 
     def setUp(self) -> None:
         self.view = view_for(ViewMode.GRID)
@@ -175,12 +199,57 @@ class GridNavigationTests(unittest.TestCase):
                 index = self.view.navigate(index, self.count, direction)
                 self.assertTrue(0 <= index < self.count)
 
-    def test_row_ends_wrap_within_the_row(self) -> None:
+    def test_right_past_the_last_column_continues_into_the_next_row(self) -> None:
         last_in_row = GridView.columns - 1
-        self.assertEqual(self.view.navigate(last_in_row, self.count, Direction.RIGHT), 0)
+        self.assertEqual(
+            self.view.navigate(last_in_row, self.count, Direction.RIGHT), GridView.columns
+        )
 
     def test_empty_gallery_is_handled(self) -> None:
         self.assertEqual(self.view.navigate(0, 0, Direction.RIGHT), 0)
+
+    def test_navigation_reaches_every_index_for_several_catalogue_sizes(self) -> None:
+        """Criterion (item 4): the board must genuinely work for any count."""
+        for count in (1, 2, 7, 12, 20):
+            with self.subTest(count=count):
+                index = 0
+                seen = {index}
+                for _ in range(count * 4):
+                    index = self.view.navigate(index, count, Direction.RIGHT)
+                    self.assertTrue(0 <= index < count)
+                    seen.add(index)
+                self.assertEqual(seen, set(range(count)))
+
+
+class GridScalingTests(HeadlessCase):
+    """Item 4: the grid must genuinely work for an arbitrary manifest size,
+    not just the six games currently shipped -- rendered, not just navigated.
+    """
+
+    def test_every_card_stays_on_screen_for_several_catalogue_sizes(self) -> None:
+        surface_rect = pygame.Rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT)
+        for count in (1, 2, 7, 12, 20):
+            manifest = synthetic_manifest(count)
+            states = {
+                game.id: GameState(game.id, GameStatus.COMING_SOON, "")
+                for game in manifest
+            }
+            for index in (0, count - 1):
+                with self.subTest(count=count, selected=index):
+                    built = GalleryFrame.build(
+                        manifest,
+                        states,
+                        selected_index=index,
+                        view_mode=ViewMode.GRID,
+                        time_ms=900,
+                        scroll=float(index),
+                    )
+                    self.assertEqual(self.renderer.render(built).get_size(), SCREEN_SIZE)
+                    page = index // (GridView.columns * 2)
+                    start = page * GridView.columns * 2
+                    for slot in range(min(GridView.columns * 2, count - start)):
+                        rect = GridView.card_rect(slot)
+                        self.assertTrue(surface_rect.contains(rect), rect)
 
 
 class LinearNavigationTests(unittest.TestCase):
@@ -322,69 +391,6 @@ class CachedRenderTests(HeadlessCase):
             renderer.ctx.cache.stats.misses, misses, "an identical frame rebuilt surfaces"
         )
         self.assertGreater(renderer.ctx.cache.stats.hits, 0)
-
-
-class SummaryTallyTests(unittest.TestCase):
-    """The header tally must be arithmetic the reader can check.
-
-    An earlier revision bucketed only ``is_playable`` and ``COMING_SOON``, so a
-    cabinet mid-sync silently dropped games from the line and the numbers no
-    longer added up.  These tests pin the partition instead of one example.
-    """
-
-    def test_the_buckets_partition_every_status(self) -> None:
-        seen: list[GameStatus] = [s for _, group in SUMMARY_BUCKETS for s in group]
-        self.assertEqual(len(seen), len(set(seen)), "a status is in two buckets")
-        self.assertEqual(set(seen), set(GameStatus), "a status is in no bucket")
-
-    def test_the_counts_always_sum_to_the_game_count(self) -> None:
-        view = view_for(ViewMode.GRID)
-        for status in GameStatus:
-            with self.subTest(status=status.name):
-                built = GalleryFrame.build(
-                    MANIFEST,
-                    all_states(status),
-                    selected_index=0,
-                    view_mode=ViewMode.GRID,
-                    time_ms=0,
-                )
-                counts = [
-                    int(part.split(" ", 1)[0])
-                    for part in view.summary(built).split("  ")[1:]
-                ]
-                self.assertEqual(sum(counts), built.count)
-
-    def test_mixed_states_still_add_up(self) -> None:
-        """Every game lands in exactly one bucket, whatever the mix."""
-        rotation = list(GameStatus)
-        states = {
-            game.id: GameState(game.id, rotation[i % len(rotation)], "x")
-            for i, game in enumerate(MANIFEST)
-        }
-        built = GalleryFrame.build(
-            MANIFEST, states, selected_index=0, view_mode=ViewMode.GRID, time_ms=0
-        )
-        line = view_for(ViewMode.GRID).summary(built)
-        counts = [int(part.split(" ", 1)[0]) for part in line.split("  ")[1:]]
-        self.assertEqual(sum(counts), built.count, line)
-
-    def test_the_line_leads_with_the_total(self) -> None:
-        built = frame(ViewMode.GRID)
-        self.assertTrue(
-            view_for(ViewMode.GRID).summary(built).startswith(f"{built.count} GAMES")
-        )
-
-    def test_empty_buckets_are_omitted(self) -> None:
-        built = GalleryFrame.build(
-            MANIFEST,
-            all_states(GameStatus.READY),
-            selected_index=0,
-            view_mode=ViewMode.GRID,
-            time_ms=0,
-        )
-        line = view_for(ViewMode.GRID).summary(built)
-        self.assertNotIn("0 ", line)
-        self.assertNotIn("SOON", line)
 
 
 class StatusDistinguishabilityTests(HeadlessCase):

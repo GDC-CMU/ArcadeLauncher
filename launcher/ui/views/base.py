@@ -6,28 +6,12 @@ from abc import ABC, abstractmethod
 from typing import ClassVar
 
 from ...input_state import Direction
-from ...status import GameStatus
 from ...viewmodes import ViewMode
 from ..components import RenderContext, draw_notice
 from ..pygame_runtime import pygame
-from ..theme import PALETTE, STATUS_COLORS, mix
 from ..viewmodel import GalleryFrame
 
-__all__ = ["GalleryView", "VIEWS", "view_for", "register", "SUMMARY_BUCKETS"]
-
-#: How the summary line groups the status vocabulary, in display order.
-#:
-#: The buckets *partition* :class:`~launcher.status.GameStatus`: every status
-#: belongs to exactly one, so the printed counts always add up to the number of
-#: games.  A status that fell through would silently make the line lie -- "6
-#: GAMES 2 PLAYABLE 2 SOON" reads as if two games had vanished -- so the
-#: partition is asserted by :mod:`tests.test_views`.
-SUMMARY_BUCKETS: tuple[tuple[str, tuple[GameStatus, ...]], ...] = (
-    ("PLAYABLE", (GameStatus.READY, GameStatus.CACHED_OFFLINE)),
-    ("UPDATING", (GameStatus.PENDING, GameStatus.UPDATING)),
-    ("UNAVAILABLE", (GameStatus.UNAVAILABLE,)),
-    ("SOON", (GameStatus.COMING_SOON,)),
-)
+__all__ = ["GalleryView", "VIEWS", "view_for", "register"]
 
 
 class GalleryView(ABC):
@@ -62,71 +46,27 @@ class GalleryView(ABC):
         return (index + step) % count
 
     # -- shared helpers -------------------------------------------------
-    @staticmethod
-    def summary(frame: GalleryFrame) -> str:
-        """A short, honest line describing the gallery as a whole.
-
-        Only non-empty buckets are printed, so a healthy cabinet reads
-        ``6 GAMES  1 PLAYABLE  5 SOON`` rather than padding the line with
-        zeroes.  Because the buckets partition the status vocabulary, whatever
-        is printed always sums to the game count.
-        """
-        counts = {
-            label: sum(1 for card in frame.cards if card.status in statuses)
-            for label, statuses in SUMMARY_BUCKETS
-        }
-        parts = [f"{count} {label}" for label, count in counts.items() if count]
-        return "  ".join([f"{frame.count} GAMES", *parts])
-
-    def draw_status_strip(
+    def draw_banner(
         self,
         surface: pygame.Surface,
         ctx: RenderContext,
         rect: pygame.Rect,
         frame: GalleryFrame,
-    ) -> None:
-        """Draw the fixed-height strip that holds a banner or the summary.
+    ) -> bool:
+        """Draw the supervisor's banner if one is pending, and report whether
+        anything was drawn.
 
-        The strip is always present, so a banner appearing after a failed game
-        can never push the rest of the composition around or clip it.
+        This used to always draw *something* -- a banner, or else a permanent
+        summary tally and an ambient "syncing" strip.  The tally never told a
+        visitor anything they could act on and read as clutter, so it is
+        gone; per-card status badges are where availability belongs now.  The
+        banner stays: it is event-driven feedback for a real thing that just
+        happened (a game crashed, the gallery restarted), not ambient noise.
         """
-        if frame.notice is not None:
-            draw_notice(surface, ctx, rect, frame.notice)
-            return
-
-        accent = STATUS_COLORS[frame.selected.status]
-        pygame.draw.rect(surface, mix(PALETTE["night"], accent, 0.10), rect, border_radius=4)
-        pygame.draw.rect(
-            surface, PALETTE["warm_amber"], pygame.Rect(rect.left, rect.top, 4, rect.height)
-        )
-        summary = self.summary(frame)
-        ctx.pixel.draw(
-            surface,
-            summary,
-            (rect.left + 16, rect.centery),
-            2,
-            PALETTE["steel"],
-            anchor="midleft",
-        )
-
-        trailing = "SYNCING IN BACKGROUND" if frame.syncing else frame.selected.detail.upper()
-        if not trailing:
-            return
-        colour = (
-            PALETTE["electric_cyan"] if frame.syncing else mix(PALETTE["steel"], accent, 0.6)
-        )
-        room = rect.width - 32 - ctx.pixel.measure(summary, 2)[0] - 24
-        while trailing and ctx.pixel.measure(trailing, 2)[0] > room:
-            trailing = trailing[:-1]
-        if len(trailing) >= 6:
-            ctx.pixel.draw(
-                surface,
-                trailing.rstrip(),
-                (rect.right - 16, rect.centery),
-                2,
-                colour,
-                anchor="midright",
-            )
+        if frame.notice is None:
+            return False
+        draw_notice(surface, ctx, rect, frame.notice)
+        return True
 
 
 #: Registry populated by :func:`register`, used by the scene renderer.

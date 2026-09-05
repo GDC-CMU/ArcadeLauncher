@@ -17,7 +17,7 @@ import logging
 import warnings
 from collections.abc import Callable
 
-from .controls import Command, command_for_button
+from .controls import BUTTON_EXIT, Command, command_for_button
 from .input_state import Direction, NavigationController, RepeatPolicy
 from .manifest import Manifest
 from .settings import Settings
@@ -69,6 +69,17 @@ _VIEW_COMMANDS: dict[Command, ViewMode] = {
 
 _TOAST_MS = 1600
 
+#: How long after a session opens Command.EXIT is refused outright.
+#:
+#: A game quits itself with Esc or P1 (button 5); the instant it exits, this
+#: process reopens the display and starts pumping events again. If the visitor
+#: is still physically holding that same key or button -- entirely plausible,
+#: since it is the same input that just closed the game -- the freshly opened
+#: gallery must not read that as "leave the gallery too" and bounce the
+#: visitor straight past it to the arcade menu. A window this short is
+#: imperceptible as a delay but comfortably outlasts a human release.
+_EXIT_SETTLE_MS = 300
+
 
 def _never() -> bool:
     """Default shutdown predicate: a session that is never asked to stop."""
@@ -115,6 +126,11 @@ class GallerySession:
         )
         self._joysticks: dict[int, pygame.joystick.Joystick] = {}
         self._should_stop = should_stop if should_stop is not None else _never
+        #: Keys/buttons already down when this session opened, mapped to
+        #: Command.EXIT; suppressed until released so a key still physically
+        #: held from before the transition cannot fire an immediate exit.
+        self._held_exit_keys: set[int] = set()
+        self._held_exit_buttons: set[tuple[int, int]] = set()
 
     # ------------------------------------------------------------------
     # Entry point (the supervisor's UiFactory)
@@ -154,8 +170,16 @@ class GallerySession:
 
         self.navigation.reset()
         self._joysticks.clear()
+        self._held_exit_keys.clear()
+        self._held_exit_buttons.clear()
         for index in range(pygame.joystick.get_count()):
             self._attach_joystick(index)
+
+        # A previous session (or the child game that just exited) can leave
+        # events sitting in SDL's queue; none of them describe *this* session
+        # and must never be read as an immediate command -- see item 1.
+        pygame.event.clear()
+        self._prime_held_exit_keys()
 
     def _release_sdl(self) -> None:
         """Give the display and every joystick back to the operating system.
@@ -216,7 +240,26 @@ class GallerySession:
 
         self._joysticks[instance_id] = stick
         self.navigation.axes.attach(instance_id)
+        if stick.get_numbuttons() > BUTTON_EXIT and stick.get_button(BUTTON_EXIT):
+            # The exit button was already down the instant this stick was
+            # opened -- almost certainly the same press that just closed the
+            # game. Suppress it until it is released; see item 1.
+            self._held_exit_buttons.add((instance_id, BUTTON_EXIT))
         _log.info("joystick attached: %s (instance %s)", stick.get_name(), instance_id)
+
+    def _prime_held_exit_keys(self) -> None:
+        """Note any exit-mapped key already down the instant the session opens.
+
+        ``pygame.key.get_pressed()`` reflects real key state independently of
+        the event queue, so this catches a physically-held key even though
+        :meth:`_open_display` has just cleared any stale queued events.
+        """
+        pressed = pygame.key.get_pressed()
+        self._held_exit_keys = {
+            key
+            for key, command in KEY_COMMANDS.items()
+            if command is Command.EXIT and key < len(pressed) and pressed[key]
+        }
 
     def _detach_joystick(self, instance_id: int) -> None:
         stick = self._joysticks.pop(instance_id, None)
@@ -226,6 +269,7 @@ class GallerySession:
             except pygame.error as exc:
                 _log.debug("joystick %s already gone: %s", instance_id, exc)
         self.navigation.axes.detach(instance_id)
+        self._held_exit_buttons.discard((instance_id, BUTTON_EXIT))
         _log.info("joystick detached: instance %s", instance_id)
 
     # ------------------------------------------------------------------
@@ -284,12 +328,19 @@ class GallerySession:
                     )
                 elif event.type == pygame.KEYDOWN and event.key in KEY_DIRECTIONS:
                     self.navigation.press_key(KEY_DIRECTIONS[event.key])
-                elif event.type == pygame.KEYUP and event.key in KEY_DIRECTIONS:
-                    self.navigation.release_key(KEY_DIRECTIONS[event.key])
+                elif event.type == pygame.KEYUP:
+                    self._held_exit_keys.discard(event.key)
+                    if event.key in KEY_DIRECTIONS:
+                        self.navigation.release_key(KEY_DIRECTIONS[event.key])
+                elif event.type == pygame.JOYBUTTONUP:
+                    self._held_exit_buttons.discard((event.instance_id, event.button))
 
                 if command is None:
                     continue
                 if command is Command.EXIT:
+                    if self._exit_is_suppressed(event, elapsed_ms):
+                        _log.debug("ignoring exit: stale or settling input")
+                        continue
                     _log.info("visitor asked to leave the gallery")
                     return self._outcome(UiAction.QUIT, mode, index)
                 if command is Command.CYCLE_VIEW:
@@ -314,7 +365,7 @@ class GallerySession:
                 focus_ms = 0
                 notice = None
 
-            scroll = self._glide(scroll, index, delta_ms)
+            scroll = self._glide(scroll, index, delta_ms, len(self.manifest))
             if toast is not None and toast.is_expired(elapsed_ms):
                 toast = None
 
@@ -328,7 +379,6 @@ class GallerySession:
                 focus_ms=focus_ms,
                 notice=notice,
                 toast=toast,
-                syncing=self.sync is not None and self.sync.is_running,
             )
             self.renderer.draw(screen, frame)
             pygame.display.flip()
@@ -354,17 +404,47 @@ class GallerySession:
             return command_for_button(event.button)
         return None
 
+    def _exit_is_suppressed(self, event: pygame.event.Event, elapsed_ms: int) -> bool:
+        """Whether an EXIT command must be ignored -- see item 1.
+
+        Two independent guards, either of which is enough to suppress:
+
+        * The settle window: for a short moment after the session opens, no
+          EXIT fires at all, so a KEYDOWN that was already queued (or that SDL
+          synthesises when the window regains input focus) cannot bounce the
+          visitor straight past a gallery they never got to see.
+        * The held-since-open check: a key or button recorded as already down
+          in :meth:`_open_display` stays suppressed until its release, which
+          catches a press that spans the transition even if it arrives after
+          the settle window (a long hold, or a slow-to-exit child process).
+        """
+        if elapsed_ms < _EXIT_SETTLE_MS:
+            return True
+        if event.type == pygame.KEYDOWN:
+            return event.key in self._held_exit_keys
+        if event.type == pygame.JOYBUTTONDOWN:
+            return (event.instance_id, event.button) in self._held_exit_buttons
+        return False
+
     @staticmethod
-    def _glide(scroll: float, index: int, delta_ms: int) -> float:
+    def _glide(scroll: float, index: int, delta_ms: int, count: int) -> float:
         """Ease the smoothed scroll position towards the real selection.
 
         The horizontal modes read this instead of the integer index so movement
-        looks like motion rather than teleportation.
+        looks like motion rather than teleportation. The step always takes the
+        *shortest* path around the wrap -- crossing from the last card to the
+        first glides forward by one slot rather than sweeping backwards across
+        every card in between -- and the result is kept inside ``0..count`` so
+        a long session cannot drift the float arbitrarily far from the index
+        it is tracking.
         """
-        distance = index - scroll
-        if abs(distance) < 0.01:
+        if count <= 0:
             return float(index)
-        return scroll + distance * min(1.0, delta_ms / 90.0)
+        raw_distance = index - scroll
+        distance = ((raw_distance + count / 2) % count) - count / 2
+        if abs(distance) < 0.01:
+            return float(index % count)
+        return (scroll + distance * min(1.0, delta_ms / 90.0)) % count
 
     def _status(self, game_id: str) -> GameStatus:
         state = self.states.get(game_id)

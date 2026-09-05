@@ -16,14 +16,13 @@ from .. import SCREEN_WIDTH
 from ..components import (
     RenderContext,
     card_cover,
-    draw_control_legend,
     draw_marquee,
     draw_mode_chip,
     draw_position_dots,
     draw_status_badge,
     draw_toast,
 )
-from ..effects import ease_out_cubic, panel, pulse
+from ..effects import ease_out_cubic, lerp_stops, panel, pulse, wrapped_distance
 from ..pygame_runtime import pygame
 from ..theme import PALETTE, STATUS_COLORS, mix, shade
 from ..viewmodel import GalleryFrame
@@ -32,15 +31,25 @@ from .base import GalleryView, register
 __all__ = ["CarouselView"]
 
 HEADER = pygame.Rect(0, 0, SCREEN_WIDTH, 66)
-STRIP = pygame.Rect(24, 72, SCREEN_WIDTH - 48, 46)
-STAGE = pygame.Rect(0, 122, SCREEN_WIDTH, 224)
-DOTS_Y = 354
-INFO = pygame.Rect(36, 364, SCREEN_WIDTH - 72, 134)
-LEGEND = pygame.Rect(16, 504, SCREEN_WIDTH - 32, 84)
+BANNER = pygame.Rect(24, 72, SCREEN_WIDTH - 48, 40)
+STAGE = pygame.Rect(0, 120, SCREEN_WIDTH, 300)
+DOTS_Y = 434
+INFO = pygame.Rect(36, 452, SCREEN_WIDTH - 72, 132)
 
-HERO_SIZE = (200, 214)
-#: Horizontal offset and scale for each distance from the selection.
-NEIGHBOUR_SLOTS: tuple[tuple[int, float], ...] = ((206, 0.74), (352, 0.50))
+HERO_SIZE = (224, 248)
+#: Continuous (distance, value) stops the *position* lerps between -- see
+#: :func:`~launcher.ui.effects.lerp_stops`. Distance 0 is the selected card;
+#: beyond the last stop nothing is drawn. Only position is continuous: the
+#: rendered *size* stays one of a handful of discrete steps (below) so the
+#: cached card art is never rebuilt at a new size every frame -- a card slides
+#: smoothly between slots and steps its scale once it crosses the midpoint to
+#: the next one, rather than the surface cache thrashing on a float that is
+#: different every frame.
+OFFSET_STOPS: tuple[tuple[float, float], ...] = ((0.0, 0.0), (1.0, 206.0), (2.0, 352.0))
+VERTICAL_STOPS: tuple[tuple[float, float], ...] = ((0.0, 0.0), (1.0, 6.0), (2.0, 6.0))
+MAX_DRAW_DISTANCE = 2.0
+#: Discrete size steps, indexed by ``round(distance)`` clamped to the last one.
+SCALE_BY_BUCKET: tuple[float, ...] = (1.0, 0.74, 0.50)
 
 
 class CarouselView(GalleryView):
@@ -52,13 +61,12 @@ class CarouselView(GalleryView):
         self, surface: pygame.Surface, ctx: RenderContext, frame: GalleryFrame
     ) -> None:
         self._draw_header(surface, ctx, frame)
-        self.draw_status_strip(surface, ctx, STRIP, frame)
+        self.draw_banner(surface, ctx, BANNER, frame)
         self._draw_stage(surface, ctx, frame)
         draw_position_dots(
             surface, (SCREEN_WIDTH // 2, DOTS_Y), frame.count, frame.selected_index
         )
         self._draw_info(surface, ctx, frame)
-        draw_control_legend(surface, ctx, LEGEND, layout="split")
 
         if frame.toast is not None:
             draw_toast(surface, ctx, (SCREEN_WIDTH // 2, STAGE.centery), frame.toast, frame.time_ms)
@@ -83,52 +91,62 @@ class CarouselView(GalleryView):
             title_scale=2,
             show_subtitle=False,
         )
-        draw_mode_chip(surface, ctx, (SCREEN_WIDTH - 24, HEADER.top + 16), frame.view_mode)
+        draw_mode_chip(
+            surface,
+            ctx,
+            (SCREEN_WIDTH - 24, HEADER.top + 16),
+            frame.view_mode,
+            position=frame.selected_index + 1,
+            count=frame.count,
+        )
 
     def _draw_stage(
         self, surface: pygame.Surface, ctx: RenderContext, frame: GalleryFrame
     ) -> None:
         centre_x = SCREEN_WIDTH // 2
-        # Smooth glide: the fractional scroll trails the integer selection.
-        drift = int((frame.selected_index - frame.scroll) * 40)
-        drift = max(-70, min(70, drift))
-
-        # Neighbours first (back to front), then the hero on top.
-        for distance in range(len(NEIGHBOUR_SLOTS), 0, -1):
-            offset, scale = NEIGHBOUR_SLOTS[distance - 1]
-            size = (int(HERO_SIZE[0] * scale), int(HERO_SIZE[1] * scale))
-            for sign in (-1, 1):
-                index = (frame.selected_index + sign * distance) % frame.count
-                rect = pygame.Rect(0, 0, *size)
-                rect.center = (centre_x + sign * offset - drift, STAGE.centery + 6)
-                card_cover(
-                    surface,
-                    ctx,
-                    rect,
-                    frame.cards[index],
-                    selected=False,
-                    time_ms=frame.time_ms,
-                    show_title=distance == 1,
-                    title_scale=1,
-                    show_badge=distance == 1,
-                    badge_scale=1,
-                    pixel=2,
-                )
-
         grow = int(8 * ease_out_cubic(min(1.0, frame.focus_ms / 260.0)))
-        hero = pygame.Rect(0, 0, HERO_SIZE[0] + grow, HERO_SIZE[1] + grow)
-        hero.center = (centre_x - drift, STAGE.centery)
-        card_cover(
-            surface,
-            ctx,
-            hero,
-            frame.selected,
-            selected=True,
-            time_ms=frame.time_ms,
-            show_title=False,
-            show_badge=False,
-            pixel=3,
-        )
+
+        # Every card's position, scale and layering come from its continuous
+        # distance to the smoothed scroll position -- not the integer index --
+        # so a card slides between slots instead of teleporting the moment the
+        # selection changes. Farthest first, so the near cards paint on top.
+        visible = []
+        for index in range(frame.count):
+            distance = wrapped_distance(index, frame.scroll, frame.count)
+            if abs(distance) > MAX_DRAW_DISTANCE:
+                continue
+            visible.append((abs(distance), distance, index))
+        visible.sort(key=lambda item: -item[0])
+
+        for magnitude, distance, index in visible:
+            is_hero = index == frame.selected_index
+            bucket = min(len(SCALE_BY_BUCKET) - 1, round(magnitude))
+            offset = lerp_stops(magnitude, OFFSET_STOPS)
+            vertical = lerp_stops(magnitude, VERTICAL_STOPS)
+            scale = SCALE_BY_BUCKET[bucket]
+            size = (
+                int(HERO_SIZE[0] * scale) + (grow if is_hero else 0),
+                int(HERO_SIZE[1] * scale) + (grow if is_hero else 0),
+            )
+            sign = 0.0 if distance == 0 else (1.0 if distance > 0 else -1.0)
+            rect = pygame.Rect(0, 0, *size)
+            rect.center = (
+                int(centre_x + sign * offset),
+                int(STAGE.centery + vertical),
+            )
+            card_cover(
+                surface,
+                ctx,
+                rect,
+                frame.cards[index],
+                selected=is_hero,
+                time_ms=frame.time_ms,
+                show_title=not is_hero and bucket == 1,
+                title_scale=1,
+                show_badge=not is_hero and bucket == 1,
+                badge_scale=1,
+                pixel=3 if is_hero else 2,
+            )
 
         # Edge fades so the neighbours bleed out rather than being cut off.
         for side in (0, 1):

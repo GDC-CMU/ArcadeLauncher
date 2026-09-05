@@ -244,6 +244,54 @@ class LoopTests(unittest.TestCase):
         self.assertIs(outcome.view_mode, ViewMode.COVER_FLOW)
 
 
+class ExitSettleTests(unittest.TestCase):
+    """Regression (item 1): a stale Esc/P1 spanning the session transition
+    must not bounce the visitor straight past the gallery.
+
+    A game quits itself on Esc/P1; the instant it exits, the gallery reopens
+    and starts pumping events again. If that key or button is still down --
+    it is, after all, the exact input that just closed the game -- the fresh
+    session must settle rather than read it as "leave the gallery too".
+    These scripts hold the exit input down for far longer than a human
+    reaction time to a fresh cabinet screen, standing in for a queued or
+    still-held press across the transition.
+    """
+
+    def run_session(self, script, **kwargs):
+        game = session(script, **kwargs)
+        outcome = game(SessionState(view_mode=kwargs.get("default_view", ViewMode.GRID)))
+        self.addCleanup(pygame.quit)
+        return game, outcome
+
+    def test_a_stale_escape_does_not_instantly_quit(self) -> None:
+        script = [[key_event(pygame.K_ESCAPE)] for _ in range(40)]
+        game, outcome = self.run_session(script)
+        self.assertIs(outcome.action, UiAction.QUIT)
+        self.assertGreater(
+            game.frames,
+            10,
+            "a stale Escape must settle before it is honoured, not fire on "
+            "the very first frames back in the gallery",
+        )
+
+    def test_a_stale_exit_button_does_not_instantly_quit(self) -> None:
+        script = [[button_event(BUTTON_EXIT)] for _ in range(40)]
+        game, outcome = self.run_session(script)
+        self.assertIs(outcome.action, UiAction.QUIT)
+        self.assertGreater(
+            game.frames,
+            10,
+            "a stale P1 must settle before it is honoured, same as Escape",
+        )
+
+    def test_a_genuine_escape_still_quits_within_the_settle_window(self) -> None:
+        """The settle window is short: an ordinary press still works quickly."""
+        script = [[key_event(pygame.K_ESCAPE)] for _ in range(40)]
+        game, outcome = self.run_session(script)
+        self.assertIs(outcome.action, UiAction.QUIT)
+        self.assertLess(game.frames, 40, "the settle window must not hang")
+
+
 class SdlLifecycleTests(unittest.TestCase):
     """Criterion F2: SDL must be fully released before a game is spawned."""
 

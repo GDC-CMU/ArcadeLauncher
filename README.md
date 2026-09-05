@@ -64,7 +64,7 @@ main.py                    arcade entrypoint: parse args, wire everything, exit 
 │   ├── art.py             procedural cover art, seeded per game
 │   ├── effects.py         glows, gradients, reflections
 │   ├── viewmodel.py       GalleryFrame — an immutable description of one frame
-│   ├── components.py      shared widgets: header, status strip, badges, legend
+│   ├── components.py      shared widgets: header, status badges, banner, toast
 │   ├── views/             grid.py · carousel.py · coverflow.py
 │   ├── scene.py           picks the view and renders it
 │   └── fatal.py           branded on-screen error, for failures before the gallery
@@ -136,8 +136,9 @@ dismiss and no dialog to get stuck in.
 | `1` `2` `3` | Jump straight to Grid / Carousel / Cover Flow |
 | `Esc` | Exit |
 
-The on-screen legend is generated from the same binding table the input handler
-uses, so it cannot drift out of date.
+There is no on-screen legend for any of this — the tables above are the
+documentation. A visitor only ever needs three buttons and the stick, and a
+permanent reminder of that on the screen read as clutter more than it helped.
 
 ## Setup
 
@@ -307,9 +308,9 @@ Three deliberately different compositions of the same six games. All are
 rendered from the real view code by `python -m tools.generate_previews`, at the
 cabinet's exact 800×600, and a test fails if they drift out of date.
 
-They show the shipped `data/games.json` exactly as a healthy cabinet would —
-one playable game and five in development — so the header tally is the launcher's
-own arithmetic, not a marketing number. Nothing here is a mock-up.
+They show the shipped `data/games.json` exactly as a healthy cabinet would --
+one playable game and five in development. Availability lives entirely on the
+per-card badge; nothing here is a mock-up.
 
 `docs/screenshots/render-manifest.json` records the SHA-256 of every PNG, a
 fingerprint of the code and data that produced them, and the Pygame/SDL_ttf
@@ -323,17 +324,19 @@ match, not the pixels.
 
 ### Grid — *see everything at once*
 
-Six equal cards in two rows of three, under a persistent status strip. The reading
-order is flat and scannable; focus is carried by a raised card, a bright rule and a
-glow rather than by size.
+A board of equal cards -- up to two rows of three -- with a subtle page dot
+row once the catalogue holds more than six. The reading order is flat and
+scannable, and navigation flows straight across row and page edges instead of
+stopping at them, so it keeps working as the catalogue grows. Focus is carried
+by a raised card, a bright rule and a glow rather than by size.
 
 ![Grid view](docs/screenshots/grid.png)
 
 ### Carousel — *one game, properly introduced*
 
-A single hero card centre stage, flanked by dimmed neighbours, over a full-width
-description panel. Position dots replace the strip's card ticks, and the strip's
-trailing text becomes the selected game's own status detail.
+A single hero card centre stage, flanked by dimmed neighbours that glide in and
+out as the selection changes, over a full-width description panel. Position
+dots mark the selected game's place in the row.
 
 ![Carousel view](docs/screenshots/carousel.png)
 

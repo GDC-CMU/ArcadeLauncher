@@ -19,7 +19,6 @@ from launcher.paths import MANIFEST_FILE, SCREENSHOTS_DIR
 from launcher.status import GameState, GameStatus
 from launcher.ui import SCREEN_SIZE
 from launcher.ui.pygame_runtime import pygame
-from launcher.ui.views import view_for
 from launcher.viewmodes import ViewMode
 from tools.generate_previews import (
     BADGE_MEANINGS,
@@ -110,24 +109,8 @@ class HonestyTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     assert_states_are_reachable(self.manifest, rigged)
 
-    def test_the_header_tally_matches_the_manifest(self) -> None:
-        """Criterion C7/H1: the stat line must be arithmetic, not decoration."""
-        playable = sum(1 for entry in self.manifest if entry.launchable)
-        soon = sum(1 for entry in self.manifest if not entry.launchable)
-        expected = f"{len(self.manifest)} GAMES  {playable} PLAYABLE  {soon} SOON"
-        for mode in ViewMode:
-            with self.subTest(mode=mode.name):
-                frame = build_frame(self.manifest, mode)
-                self.assertEqual(view_for(mode).summary(frame), expected)
-
-    def test_the_shipped_manifest_renders_one_playable_and_five_soon(self) -> None:
-        frame = build_frame(self.manifest, ViewMode.GRID)
-        self.assertEqual(
-            view_for(ViewMode.GRID).summary(frame), "6 GAMES  1 PLAYABLE  5 SOON"
-        )
-
-    def test_no_shot_hides_the_tally_behind_a_banner(self) -> None:
-        """The status strip shows a notice *instead of* the summary."""
+    def test_no_shot_shows_a_banner(self) -> None:
+        """The screenshots depict a healthy cabinet: no notice banner shown."""
         for mode in ViewMode:
             with self.subTest(mode=mode.name):
                 self.assertIsNone(build_frame(self.manifest, mode).notice)

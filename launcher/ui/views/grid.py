@@ -1,8 +1,17 @@
-"""Grid -- the 3x2 cabinet board.
+"""Grid -- the cabinet board.
 
-Composition: a full-width marquee band across the top, six equal cards laid out
-as a board, and a two-row control legend along the bottom.  Everything is
-visible at once, and the stick moves in two real dimensions.
+Composition: a full-width marquee band across the top and a board of equal
+cards beneath it, sized to fill the freed space now that the permanent status
+strip and control legend are gone. Everything on the current page is visible
+at once, and the stick moves in two real dimensions.
+
+The board is a fixed 3x2 shape, so it *paginates* rather than growing without
+bound: a catalogue of 20 games is four pages of up to six, not twenty cards
+squeezed below the visible area. Left/right and up/down both move in reading
+order across the whole catalogue -- crossing a row or page edge simply
+continues onto the next slot rather than dead-ending -- so navigation always
+reaches every game regardless of how many the club has published, and a
+subtle dot row only appears once there is more than one page to indicate.
 """
 
 from __future__ import annotations
@@ -16,9 +25,9 @@ from .. import SCREEN_HEIGHT, SCREEN_WIDTH
 from ..components import (
     RenderContext,
     card_cover,
-    draw_control_legend,
     draw_marquee,
     draw_mode_chip,
+    draw_position_dots,
     draw_toast,
 )
 from ..effects import ease_out_cubic
@@ -31,57 +40,47 @@ __all__ = ["GridView"]
 
 COLUMNS = 3
 ROWS = 2
+PAGE_SIZE = COLUMNS * ROWS
 
 HEADER = pygame.Rect(0, 0, SCREEN_WIDTH, 92)
-STRIP = pygame.Rect(24, 98, SCREEN_WIDTH - 48, 44)
-LEGEND = pygame.Rect(16, 506, SCREEN_WIDTH - 32, 82)
+BANNER = pygame.Rect(24, 100, SCREEN_WIDTH - 48, 40)
+PAGE_DOTS_Y = SCREEN_HEIGHT - 20
 
-CARD_MARGIN_X = 26
-CARD_GAP_X = 17
-CARD_GAP_Y = 12
-CARD_TOP = 156
+CARD_MARGIN_X = 30
+CARD_GAP_X = 20
+CARD_GAP_Y = 18
+CARD_TOP = HEADER.bottom + 22
+CARD_BOTTOM_MARGIN = 30
 CARD_WIDTH = (SCREEN_WIDTH - CARD_MARGIN_X * 2 - CARD_GAP_X * (COLUMNS - 1)) // COLUMNS
-CARD_HEIGHT = 163
+CARD_HEIGHT = (SCREEN_HEIGHT - CARD_TOP - CARD_BOTTOM_MARGIN - CARD_GAP_Y * (ROWS - 1)) // ROWS
 
 
 class GridView(GalleryView):
-    """A polished 3x2 board with natural two-dimensional navigation."""
+    """A board of cards, paginated so any catalogue size stays on-screen."""
 
     mode: ClassVar[ViewMode] = ViewMode.GRID
     columns: ClassVar[int] = COLUMNS
 
     def navigate(self, index: int, count: int, direction: Direction) -> int:
-        """Move by one column or one row, wrapping on both axes."""
+        """Move one slot in reading order, wrapping at either end.
+
+        Left/right step by one card; up/down step by a whole row (one page
+        width). Both flow across row and page boundaries rather than
+        stopping at them, which is what lets the same rule reach every card
+        in a catalogue of any size instead of only the first six.
+        """
         if count <= 0:
             return 0
-        rows = max(1, math.ceil(count / COLUMNS))
-        row, column = divmod(index, COLUMNS)
-
-        if direction is Direction.LEFT:
-            column -= 1
-        elif direction is Direction.RIGHT:
-            column += 1
-        elif direction is Direction.UP:
-            row -= 1
+        if direction in (Direction.LEFT, Direction.RIGHT):
+            step = -1 if direction is Direction.LEFT else 1
         else:
-            row += 1
-
-        if column < 0:
-            column = COLUMNS - 1
-        elif column >= COLUMNS:
-            column = 0
-        row %= rows
-
-        target = row * COLUMNS + column
-        if target >= count:
-            # Short final row: fall back to the last real card in that column.
-            target = min(count - 1, target)
-        return target
+            step = -COLUMNS if direction is Direction.UP else COLUMNS
+        return (index + step) % count
 
     @staticmethod
-    def card_rect(index: int) -> pygame.Rect:
-        """Return the board slot for *index* (0-5, reading order)."""
-        row, column = divmod(index, COLUMNS)
+    def card_rect(slot: int) -> pygame.Rect:
+        """Return the board position for *slot* (0-based, within one page)."""
+        row, column = divmod(slot, COLUMNS)
         return pygame.Rect(
             CARD_MARGIN_X + column * (CARD_WIDTH + CARD_GAP_X),
             CARD_TOP + row * (CARD_HEIGHT + CARD_GAP_Y),
@@ -93,11 +92,15 @@ class GridView(GalleryView):
         self, surface: pygame.Surface, ctx: RenderContext, frame: GalleryFrame
     ) -> None:
         self._draw_header(surface, ctx, frame)
-        self.draw_status_strip(surface, ctx, STRIP, frame)
+        self.draw_banner(surface, ctx, BANNER, frame)
+
+        pages = max(1, math.ceil(frame.count / PAGE_SIZE))
+        page = frame.selected_index // PAGE_SIZE
+        start = page * PAGE_SIZE
 
         grow = int(6 * ease_out_cubic(min(1.0, frame.focus_ms / 220.0)))
-        for index, card in enumerate(frame.cards):
-            rect = self.card_rect(index)
+        for slot, index in enumerate(range(start, min(start + PAGE_SIZE, frame.count))):
+            rect = self.card_rect(slot)
             selected = index == frame.selected_index
             if selected:
                 rect = rect.inflate(grow * 2, grow * 2)
@@ -105,7 +108,7 @@ class GridView(GalleryView):
                 surface,
                 ctx,
                 rect,
-                card,
+                frame.cards[index],
                 selected=selected,
                 time_ms=frame.time_ms,
                 title_scale=2,
@@ -113,7 +116,8 @@ class GridView(GalleryView):
                 pixel=3,
             )
 
-        draw_control_legend(surface, ctx, LEGEND, layout="bar")
+        if pages > 1:
+            draw_position_dots(surface, (SCREEN_WIDTH // 2, PAGE_DOTS_Y), pages, page)
 
         if frame.toast is not None:
             draw_toast(
@@ -142,7 +146,12 @@ class GridView(GalleryView):
             title_scale=3,
         )
         draw_mode_chip(
-            surface, ctx, (SCREEN_WIDTH - 26, HEADER.top + 26), frame.view_mode
+            surface,
+            ctx,
+            (SCREEN_WIDTH - 26, HEADER.top + 26),
+            frame.view_mode,
+            position=frame.selected_index + 1,
+            count=frame.count,
         )
 
 

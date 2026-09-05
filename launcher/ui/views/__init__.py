@@ -7,7 +7,7 @@ they lay the screen out very differently on purpose.
 
 from __future__ import annotations
 
-from .base import SUMMARY_BUCKETS, GalleryView, VIEWS, view_for
+from .base import GalleryView, VIEWS, view_for
 from .carousel import CarouselView
 from .coverflow import CoverFlowView
 from .grid import GridView
@@ -19,5 +19,4 @@ __all__ = [
     "CoverFlowView",
     "VIEWS",
     "view_for",
-    "SUMMARY_BUCKETS",
 ]

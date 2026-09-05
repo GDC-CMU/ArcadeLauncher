@@ -1,8 +1,8 @@
-"""Shared drawing helpers: panels, glows, scanlines, vignettes and easing.
+"""Shared drawing helpers: panels, glows, vignettes and easing.
 
-Everything here is deliberately cheap or cached.  The scanline and vignette
-overlays in particular are built once per screen size and then blitted, rather
-than being recomputed per frame.
+Everything here is deliberately cheap or cached.  The vignette overlay in
+particular is built once per screen size and then blitted, rather than being
+recomputed per frame.
 """
 
 from __future__ import annotations
@@ -16,14 +16,14 @@ __all__ = [
     "ease_out_cubic",
     "ease_in_out",
     "pulse",
+    "lerp_stops",
+    "wrapped_distance",
     "panel",
     "outline",
     "glow_frame",
     "corner_ticks",
     "vertical_gradient",
-    "scanlines",
     "vignette",
-    "dither_band",
     "reflect",
     "horizon_glow",
 ]
@@ -49,6 +49,41 @@ def pulse(time_ms: int, period_ms: int = 1600, low: float = 0.35, high: float = 
     phase = (time_ms % period_ms) / period_ms
     wave = (math.sin(phase * math.tau) + 1.0) * 0.5
     return low + (high - low) * wave
+
+
+def lerp_stops(value: float, stops: tuple[tuple[float, float], ...]) -> float:
+    """Piecewise-linear interpolation through ascending ``(x, y)`` stops.
+
+    Turns a continuous distance from the current selection into a position,
+    scale or offset that *slides* between the values a discrete lookup would
+    have snapped between -- what makes carousel and cover-flow movement read
+    as motion instead of a sequence of teleports.  Below the first stop or
+    above the last, the nearest edge value holds rather than extrapolating.
+    """
+    if value <= stops[0][0]:
+        return stops[0][1]
+    for (x0, y0), (x1, y1) in zip(stops, stops[1:]):
+        if value <= x1:
+            span = x1 - x0
+            t = 0.0 if span <= 0 else (value - x0) / span
+            return y0 + (y1 - y0) * t
+    return stops[-1][1]
+
+
+def wrapped_distance(index: int, position: float, count: int) -> float:
+    """Signed distance from *position* to *index*, taking the shortest way
+    around a wrapping row of *count* cards.
+
+    Used by every mode that lays cards out along a continuous, wrapping axis:
+    without this, a selection near one end of the row would compute its
+    neighbours' distance the long way around and either draw them off-screen
+    or -- if plugged into a glide -- sweep the whole row across the screen
+    when wrapping from the last card back to the first.
+    """
+    if count <= 0:
+        return 0.0
+    raw = index - position
+    return ((raw + count / 2) % count) - count / 2
 
 
 # ---------------------------------------------------------------------------
@@ -161,45 +196,32 @@ def vertical_gradient(
     return surface
 
 
-def scanlines(size: tuple[int, int], alpha: int = 30, spacing: int = 3) -> pygame.Surface:
-    """Build a restrained CRT scanline overlay (one dark line every *spacing*)."""
-    width, height = size
-    surface = pygame.Surface(size, pygame.SRCALPHA)
-    surface.fill((0, 0, 0, 0))
-    line = (0, 0, 0, alpha)
-    for y in range(0, height, spacing):
-        pygame.draw.line(surface, line, (0, y), (width, y))
-    return surface
-
-
 def vignette(size: tuple[int, int], strength: int = 108, steps: int = 26) -> pygame.Surface:
-    """Build a rectangular vignette that pushes focus towards the centre."""
+    """Build a rectangular vignette that pushes focus towards the centre.
+
+    Each ring's stroke width is sized to exactly match the gap to the next
+    ring (plus a hair of overlap for rounding), so the rings tile into one
+    smooth gradient. An earlier version sized the stroke independently of the
+    step -- ``steps - index`` px, unrelated to the actual gap between rings --
+    which left every ring's edge visible as a hard line, the exact "grid of
+    lines" complaint this build was asked to fix.
+    """
     width, height = size
     surface = pygame.Surface(size, pygame.SRCALPHA)
     surface.fill((0, 0, 0, 0))
+    half = min(width, height) / 2
+    band = half / max(1, steps - 1)
+    ring_width = max(2, int(band) + 2)
     for index in range(steps):
         ratio = index / max(1, steps - 1)
         alpha = int(strength * (ratio**2.2))
-        inset = int((1.0 - ratio) * min(width, height) * 0.5)
+        if alpha <= 0:
+            continue
+        inset = int((1.0 - ratio) * half)
         rect = pygame.Rect(inset, inset, width - inset * 2, height - inset * 2)
         if rect.width <= 0 or rect.height <= 0:
             continue
-        pygame.draw.rect(surface, (0, 0, 0, alpha), rect, width=max(2, steps - index))
-    return surface
-
-
-def dither_band(
-    size: tuple[int, int], fill: Color, alpha: int = 40, step: int = 4
-) -> pygame.Surface:
-    """Build a checkerboard dither wash used to texture large flat areas."""
-    width, height = size
-    surface = pygame.Surface(size, pygame.SRCALPHA)
-    surface.fill((0, 0, 0, 0))
-    colour = with_alpha(fill, alpha)
-    for y in range(0, height, step):
-        offset = 0 if (y // step) % 2 == 0 else step // 2
-        for x in range(offset, width, step):
-            surface.fill(colour, pygame.Rect(x, y, step // 2, step // 2))
+        pygame.draw.rect(surface, (0, 0, 0, alpha), rect, width=ring_width)
     return surface
 
 

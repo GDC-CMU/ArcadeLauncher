@@ -83,7 +83,6 @@ class GalleryFrame:
             focus-in animation.
         notice: Optional banner from the supervisor.
         toast: Optional transient feedback.
-        syncing: Whether a background sync is in flight.
     """
 
     cards: tuple[Card, ...]
@@ -94,7 +93,6 @@ class GalleryFrame:
     focus_ms: int = 0
     notice: Notice | None = None
     toast: Toast | None = None
-    syncing: bool = False
 
     def __post_init__(self) -> None:
         if not self.cards:

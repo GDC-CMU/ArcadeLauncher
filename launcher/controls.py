@@ -18,8 +18,6 @@ __all__ = [
     "BUTTON_CYCLE_VIEW",
     "ARCADE_BUTTON_COMMANDS",
     "command_for_button",
-    "LEGEND_ARCADE",
-    "LEGEND_KEYBOARD",
 ]
 
 
@@ -68,20 +66,3 @@ def command_for_button(button: int | str) -> Command | None:
     except (TypeError, ValueError):
         return None
     return ARCADE_BUTTON_COMMANDS.get(number)
-
-
-#: Rendered in the on-screen legend. Kept next to the bindings so the legend
-#: can never drift away from the behaviour (acceptance criterion E5).
-LEGEND_ARCADE: tuple[tuple[str, str], ...] = (
-    ("JOYSTICK", "Browse games"),
-    ("A  (1)", "Play selected"),
-    ("SELECT (8)", "Change view"),
-    ("P1 (5)", "Exit to arcade menu"),
-)
-
-LEGEND_KEYBOARD: tuple[tuple[str, str], ...] = (
-    ("ARROWS / WASD", "Browse games"),
-    ("ENTER / SPACE", "Play selected"),
-    ("TAB / 1 2 3", "Change view"),
-    ("ESC", "Exit to arcade menu"),
-)

@@ -269,9 +269,8 @@ def render_badge_sheet(renderer: Renderer, size: tuple[int, int]) -> pygame.Surf
     )
     surface.blit(footer, footer.get_rect(midleft=(26, 566)))
 
-    vig, lines = renderer.overlays(size)
+    vig = renderer.overlays(size)
     surface.blit(vig, (0, 0))
-    surface.blit(lines, (0, 0))
     return surface
 
 

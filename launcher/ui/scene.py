@@ -1,9 +1,9 @@
-"""The renderer: shared background, view dispatch, CRT finish.
+"""The renderer: shared background, view dispatch, vignette finish.
 
 Views draw the *content*; the scene owns everything that is identical in all
-three modes -- the deep gradient field, the vignette, and the scanline overlay
-that goes on last.  All three overlays are built once and cached, so a frame
-costs three blits regardless of how long the gallery has been running.
+three modes -- the deep gradient field and the vignette that goes on last.
+Both are built once and cached, so a frame costs two blits regardless of how
+long the gallery has been running.
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ from __future__ import annotations
 from ..viewmodes import ViewMode
 from . import SCREEN_SIZE
 from .components import RenderContext
-from .effects import dither_band, scanlines, vertical_gradient, vignette
+from .effects import vertical_gradient, vignette
 from .pygame_runtime import pygame
 from .theme import PALETTE, mix, shade
 from .viewmodel import GalleryFrame
@@ -42,7 +42,6 @@ class Renderer:
                 PALETTE["void"],
                 bands=40,
             )
-            field.blit(dither_band(size, PALETTE["violet"], alpha=16, step=6), (0, 0))
             # A soft glow behind the middle of the screen keeps the eye where
             # the content is.  It is built as two mirrored gradients so there
             # is no hard seam where the band starts.
@@ -63,13 +62,14 @@ class Renderer:
 
         return self.ctx.cache.get(("bg", size), build)
 
-    def overlays(self, size: tuple[int, int]) -> tuple[pygame.Surface, pygame.Surface]:
-        """Return the cached ``(vignette, scanlines)`` pair for *size*."""
-        vig = self.ctx.cache.get(("vignette", size), lambda: vignette(size))
-        lines = self.ctx.cache.get(
-            ("scanlines", size), lambda: scanlines(size, alpha=26, spacing=3)
-        )
-        return vig, lines
+    def overlays(self, size: tuple[int, int]) -> pygame.Surface:
+        """Return the cached vignette for *size*.
+
+        The CRT scanline grid this used to layer on top read as visual noise
+        rather than atmosphere -- gone in favour of a plain, deliberate dark
+        field that lets card art and titles do the work.
+        """
+        return self.ctx.cache.get(("vignette", size), lambda: vignette(size))
 
     # -- frame ----------------------------------------------------------
     def draw(self, surface: pygame.Surface, frame: GalleryFrame) -> None:
@@ -77,9 +77,7 @@ class Renderer:
         size = surface.get_size()
         surface.blit(self.background(size), (0, 0))
         view_for(frame.view_mode).draw(surface, self.ctx, frame)
-        vig, lines = self.overlays(size)
-        surface.blit(vig, (0, 0))
-        surface.blit(lines, (0, 0))
+        surface.blit(self.overlays(size), (0, 0))
 
     def render(self, frame: GalleryFrame, size: tuple[int, int] = SCREEN_SIZE) -> pygame.Surface:
         """Return a freshly drawn surface -- used by the preview tool."""

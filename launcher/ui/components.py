@@ -1,4 +1,4 @@
-"""Shared chrome: marquee, status badges, control legend, banners and toasts.
+"""Shared chrome: marquee, status badges, banners and toasts.
 
 Every view composes these differently -- that is how the three modes stay one
 visual system while reading as three deliberate layouts.
@@ -10,17 +10,15 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..controls import LEGEND_ARCADE, LEGEND_KEYBOARD
 from ..paths import BRANDING_LOGO
 from ..status import GameStatus, Notice
-from ..viewmodes import CYCLE_ORDER, ViewMode
+from ..viewmodes import ViewMode
 from . import SCREEN_WIDTH
 from .art import render_card_art
 from .effects import corner_ticks, glow_frame, outline, panel, pulse
 from .pygame_runtime import pygame
 from .surfaces import SurfaceCache
 from .theme import (
-    Color,
     FontBook,
     PALETTE,
     PixelFont,
@@ -37,7 +35,6 @@ __all__ = [
     "draw_marquee",
     "draw_mode_chip",
     "draw_status_badge",
-    "draw_control_legend",
     "draw_notice",
     "draw_toast",
     "draw_position_dots",
@@ -45,14 +42,6 @@ __all__ = [
 ]
 
 _log = logging.getLogger(__name__)
-
-#: Verb-only labels used where a legend column is too narrow for the full text.
-_SHORT_ACTIONS = {
-    "Browse games": "Browse",
-    "Play selected": "Play",
-    "Change view": "View",
-    "Exit to arcade menu": "Exit",
-}
 
 
 @dataclass(slots=True)
@@ -160,11 +149,21 @@ def draw_mode_chip(
     anchor: tuple[int, int],
     mode: ViewMode,
     *,
+    position: int | None = None,
+    count: int | None = None,
     align: str = "topright",
     scale: int = 2,
 ) -> pygame.Rect:
-    """Draw the 'CAROUSEL 2/3' chip that names the active composition."""
-    label = f"{mode.label} {mode.slot}/{len(CYCLE_ORDER)}"
+    """Draw the chip that names the active composition.
+
+    When *position* and *count* are given the chip reads e.g. ``CAROUSEL
+    4/6`` -- the selected game's place in the catalogue, which is the number a
+    visitor can actually cross-check against the row of cards in front of
+    them. It never reports which of the three view modes is active (that used
+    to read "CAROUSEL 2/3", a developer-facing detail a visitor cannot verify
+    and easily mistakes for a bug).
+    """
+    label = mode.label if position is None or not count else f"{mode.label} {position}/{count}"
     text = ctx.pixel.render(label, scale, PALETTE["electric_cyan"])
     box = pygame.Rect(0, 0, text.get_width() + 24, text.get_height() + 16)
     setattr(box, align, anchor)
@@ -277,144 +276,6 @@ def card_cover(
     if selected:
         glow_frame(surface, rect, PALETTE["warm_amber"], pulse(time_ms, 1800, 0.5, 1.0))
         corner_ticks(surface, rect.inflate(10, 10), PALETTE["electric_cyan"])
-
-
-# ---------------------------------------------------------------------------
-# Legend
-# ---------------------------------------------------------------------------
-def draw_control_legend(
-    surface: pygame.Surface,
-    ctx: RenderContext,
-    rect: pygame.Rect,
-    *,
-    layout: str = "bar",
-) -> None:
-    """Draw the on-screen control legend.
-
-    Args:
-        layout: ``"bar"`` -- arcade row plus a keyboard row (Grid);
-            ``"split"`` -- arcade left, keyboard right (Carousel);
-            ``"inline"`` -- one dense strip (Cover Flow).
-    """
-    panel(surface, rect, shade(PALETTE["night"], 1.05), PALETTE["panel_edge"], radius=6)
-    pygame.draw.line(
-        surface, PALETTE["deep_cyan"], (rect.left + 10, rect.top), (rect.right - 10, rect.top), 2
-    )
-
-    if layout == "inline":
-        _legend_inline(surface, ctx, rect)
-        return
-    if layout == "split":
-        _legend_split(surface, ctx, rect)
-        return
-    _legend_bar(surface, ctx, rect)
-
-
-def _legend_entry_width(ctx: RenderContext, key: str, action: str, scale: int) -> int:
-    return ctx.pixel.measure(key, scale)[0] + 10 + ctx.fonts.named("body").size(action)[0]
-
-
-def _draw_legend_entry(
-    surface: pygame.Surface,
-    ctx: RenderContext,
-    left: int,
-    centre_y: int,
-    key: str,
-    action: str,
-    scale: int,
-    key_color: Color = PALETTE["warm_amber"],
-    action_color: Color = PALETTE["bone"],
-    action_size: str = "body",
-) -> int:
-    key_surface = ctx.pixel.render(key, scale, key_color)
-    surface.blit(key_surface, key_surface.get_rect(midleft=(left, centre_y)))
-    action_surface = ctx.fonts.render(action, action_size, action_color)
-    action_left = left + key_surface.get_width() + 10
-    surface.blit(action_surface, action_surface.get_rect(midleft=(action_left, centre_y + 1)))
-    return action_left + action_surface.get_width()
-
-
-def _legend_bar(surface: pygame.Surface, ctx: RenderContext, rect: pygame.Rect) -> None:
-    entries = (("STICK", "Browse"), ("A", "Play"), ("SELECT", "View"), ("P1", "Exit"))
-    widths = [_legend_entry_width(ctx, key, action, 2) for key, action in entries]
-    spacing = max(16, (rect.width - 40 - sum(widths)) // max(1, len(entries) - 1))
-    cursor = rect.left + 20
-    row_y = rect.top + 26
-    for (key, action), width in zip(entries, widths):
-        _draw_legend_entry(surface, ctx, cursor, row_y, key, action, 2)
-        cursor += width + spacing
-
-    keyboard = "KEYBOARD   " + "   ".join(
-        f"{key} {action.lower()}" for key, action in LEGEND_KEYBOARD
-    )
-    hint = ctx.fonts.render(keyboard, "caption", PALETTE["slate"])
-    surface.blit(hint, hint.get_rect(midleft=(rect.left + 20, rect.top + 58)))
-
-
-def _legend_split(surface: pygame.Surface, ctx: RenderContext, rect: pygame.Rect) -> None:
-    """Arcade controls on the left, keyboard equivalents on the right.
-
-    Each half is a 2x2 block.  Actions are abbreviated to their verb so two
-    columns fit inside half a screen without colliding.
-    """
-    half = rect.width // 2 - 26
-    column_pitch = half // 2
-    ctx.pixel.draw(surface, "ARCADE", (rect.left + 20, rect.top + 12), 1, PALETTE["deep_cyan"])
-    ctx.pixel.draw(
-        surface, "KEYBOARD", (rect.centerx + 14, rect.top + 12), 1, PALETTE["deep_cyan"]
-    )
-    pygame.draw.line(
-        surface,
-        PALETTE["panel_edge"],
-        (rect.centerx - 2, rect.top + 12),
-        (rect.centerx - 2, rect.bottom - 12),
-    )
-
-    for index, (key, action) in enumerate(LEGEND_ARCADE):
-        _draw_legend_entry(
-            surface,
-            ctx,
-            rect.left + 20 + (index % 2) * column_pitch,
-            rect.top + 40 + (index // 2) * 26,
-            key.replace("  ", " "),
-            _SHORT_ACTIONS[action],
-            2,
-            action_size="caption",
-        )
-    for index, (key, action) in enumerate(LEGEND_KEYBOARD):
-        _draw_legend_entry(
-            surface,
-            ctx,
-            rect.centerx + 14 + (index % 2) * column_pitch,
-            rect.top + 40 + (index // 2) * 26,
-            key,
-            _SHORT_ACTIONS[action],
-            1,
-            key_color=PALETTE["steel"],
-            action_color=PALETTE["slate"],
-            action_size="caption",
-        )
-
-
-def _legend_inline(surface: pygame.Surface, ctx: RenderContext, rect: pygame.Rect) -> None:
-    entries = (
-        ("STICK", "Browse"),
-        ("A", "Play"),
-        ("SELECT", "View"),
-        ("P1", "Exit"),
-    )
-    widths = [_legend_entry_width(ctx, key, action, 2) for key, action in entries]
-    spacing = max(14, (rect.width - 44 - sum(widths)) // max(1, len(entries) - 1))
-    cursor = rect.left + 22
-    for (key, action), width in zip(entries, widths):
-        _draw_legend_entry(surface, ctx, cursor, rect.centery - 7, key, action, 2)
-        cursor += width + spacing
-    hint = ctx.fonts.render(
-        "Keyboard: arrows/WASD move  -  Enter play  -  Tab or 1 2 3 view  -  Esc exit",
-        "caption",
-        PALETTE["slate"],
-    )
-    surface.blit(hint, hint.get_rect(midtop=(rect.centerx, rect.centery + 8)))
 
 
 # ---------------------------------------------------------------------------

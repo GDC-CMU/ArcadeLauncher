@@ -295,6 +295,12 @@ class FakeStick:
     def get_name(self) -> str:
         return self._name
 
+    def get_numbuttons(self) -> int:
+        return 0
+
+    def get_button(self, button: int) -> bool:
+        return False
+
     def quit(self) -> None:
         self.quit_calls += 1
 

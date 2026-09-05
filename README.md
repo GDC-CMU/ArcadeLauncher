@@ -272,6 +272,14 @@ selection — and there is a test pinning that, so it stays true.
 
 ## Offline behaviour
 
+**Yes, the cabinet works with no Wi-Fi.** Every game already cached keeps
+playing exactly as before; the gallery stays fully interactive and browsable;
+cards that are cached read `CACHED OFFLINE` instead of `PLAYABLE`, and only a
+game that has *never* downloaded successfully on this cabinet shows
+`UNAVAILABLE`. The one real requirement is that each game needs the network
+**once**, the first time it is ever added — after that first successful
+clone, it is on disk for good and a dead network cannot take it away.
+
 Game checkouts live in `.arcade-cache/` (git-ignored, never committed). On
 start-up a background thread refreshes each launchable game while the gallery is
 already interactive — updating never blocks browsing. Every refresh actually
@@ -281,6 +289,20 @@ exactly what once let a three-commits-stale build run for hours while reading
 presses Play — so even a session left running all day hands out the build
 that exists *right then*, not whatever was current when the gallery opened.
 Both refreshes are backgrounded; neither blocks rendering.
+
+**Every git call is bounded, deliberately tightly.** A disconnected cabinet
+used to pay a 45-second network timeout *per launchable game* at start-up,
+and once more before every launch — over 20 seconds of that was spent simply
+failing to connect, on every single one of those calls. It now gives up on a
+single git command after `network_timeout_s` seconds (`8` by default — see
+`config/launcher.json`), and the pre-launch refresh a visitor's own Play
+press waits on is bounded separately and much tighter still: a couple of
+seconds, after which it launches the copy already confirmed on disk rather
+than leaving the visitor staring at `UPDATING`. Once a fetch or clone has
+actually timed out, the launcher also stops re-paying that timeout for a
+while — only the first attempt against a genuinely dead network is
+expensive; every game after it fails fast for about a minute before trying
+again, in case the Wi-Fi comes back mid-fair.
 
 Each card reports exactly what is true of it right now, including the short
 commit id of the build it is showing — the answer to "am I running the
@@ -303,6 +325,9 @@ The rules that follow from this:
 
 - **A failed update never removes a working game.** A fetch that fails downgrades
   the badge to `OFFLINE` and leaves the checkout alone.
+- **A launch never waits on the network for a game already on disk.** The
+  pre-launch refresh above is bounded; if it has not answered in time, the
+  cached copy starts anyway. See "Every git call is bounded" above.
 - **Coming-soon entries never touch the network.** They structurally carry no
   repository, ref or entrypoint, so there is nothing to clone.
 - **Nothing outside the cache is ever executed.** Every entrypoint is resolved

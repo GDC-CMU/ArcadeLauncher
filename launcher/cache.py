@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
 import time
 from dataclasses import dataclass
@@ -37,6 +38,120 @@ __all__ = [
 ]
 
 _log = logging.getLogger(__name__)
+
+#: Default per-git-command network timeout, in seconds.
+#:
+#: A club fair's Wi-Fi, when it exists at all, either connects in well under a
+#: second or is not there -- there is no realistic "slow but working" middle
+#: ground worth waiting through. This runs once per launchable game at
+#: start-up (:meth:`~launcher.sync.SyncService.request_all`) *and* once more,
+#: immediately, before every launch, so a high timeout does not just delay
+#: one card's badge: with no network it multiplies by the whole catalogue and
+#: then again by every visitor who presses Play. A previous value of 45s
+#: measured at 21s to *fail* against an unreachable host on this cabinet's
+#: network stack -- per game, every time. Low enough that a genuinely healthy
+#: connection is never at risk of being cut off (git clone/fetch calls here
+#: are shallow and small), high enough that an ordinarily slow-but-working
+#: club Wi-Fi still gets to finish.
+_DEFAULT_GIT_TIMEOUT_S = 8
+
+#: How long a runner remembers "the network looked unreachable" after a
+#: fetch or clone actually times out, before it is willing to pay the full
+#: timeout again. Without this, a disconnected cabinet re-discovers the same
+#: dead network once per launchable game at start-up and once more before
+#: every launch -- each one paying the full timeout in serial on the sync
+#: worker. With it, only the first attempt in a session is expensive; every
+#: other network-touching call for the rest of the cooldown fails instantly.
+#: Long enough to actually save something; short enough that a Wi-Fi that
+#: comes back mid-fair is noticed within a minute, not ignored for the rest
+#: of the day.
+_NETWORK_RETRY_COOLDOWN_S = 60.0
+
+#: Git subcommands that actually touch the network -- only these are subject
+#: to the cooldown above. ``rev-parse``/``reset`` are purely local and must
+#: never be skipped by it.
+_NETWORK_VERBS = frozenset({"clone", "fetch"})
+
+
+def _git_environment() -> dict[str, str]:
+    """The environment every git subprocess call runs with.
+
+    ``GIT_TERMINAL_PROMPT=0`` stops git from ever blocking on a username or
+    password prompt it has nowhere to show -- there is no terminal at a club
+    fair to answer it, and without this a private or moved repository would
+    hang the sync worker indefinitely rather than failing like any other
+    network error. ``GIT_ASKPASS`` is a second, belt-and-braces guard for the
+    same failure mode should some local git configuration still prefer a GUI
+    credential helper: pointed at ``echo``, it answers instantly with nothing
+    rather than launching a helper that has no display to show either.
+    """
+    env = dict(os.environ)
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env.setdefault("GIT_ASKPASS", "echo")
+    return env
+
+
+def _kill_process_tree(process: "subprocess.Popen[str]") -> None:
+    """Kill *process* and everything it spawned, not just the one pid.
+
+    For an ``https://`` remote, git does not connect itself: it hands the URL
+    to a *remote helper* it spawns as its own child (``git-remote-https``),
+    which does the actual network connect and inherits git's stdout/stderr
+    pipes. Killing only the top-level git process leaves that helper running
+    -- still holding those pipes open -- so whatever is reading them keeps
+    blocking for however long the helper's own connect attempt takes,
+    regardless of any timeout configured up here. Measured directly against
+    an unreachable host: a configured 8s timeout still took 21s end to end
+    until the whole tree, not just git, was killed. Both branches below start
+    the command in its own group/job (see the ``Popen`` call in
+    :func:`_run_git`) specifically so this can target the group instead of a
+    single pid.
+    """
+    if os.name == "nt":
+        subprocess.run(  # noqa: S603 - fixed argv, no shell
+            ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+            capture_output=True,
+        )
+    else:
+        import signal
+
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            process.kill()
+
+
+def _run_git(
+    command: Sequence[str], cwd: Path | None, timeout_s: float
+) -> subprocess.CompletedProcess:
+    """Run *command*, guaranteeing the whole process tree is gone by
+    *timeout_s* -- see :func:`_kill_process_tree` for why that guarantee
+    needs more than ``subprocess.run``'s own ``timeout=`` argument.
+    """
+    popen_kwargs: dict[str, object] = {}
+    if os.name == "nt":
+        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        popen_kwargs["start_new_session"] = True
+
+    process = subprocess.Popen(  # noqa: S603 - argument list, no shell
+        list(command),
+        cwd=str(cwd) if cwd is not None else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=_git_environment(),
+        **popen_kwargs,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        _kill_process_tree(process)
+        # The tree is dead, so this drains whatever the pipes already held
+        # and returns immediately -- it is not a second wait.
+        stdout, stderr = process.communicate()
+        raise subprocess.TimeoutExpired(list(command), timeout_s, output=stdout, stderr=stderr)
+    return subprocess.CompletedProcess(list(command), process.returncode, stdout, stderr)
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,23 +191,30 @@ class SubprocessGitRunner:
     Args:
         executable: Name or path of the git binary.
         timeout_s: Per-command timeout; a hung network call must not freeze the
-            background worker forever.
+            background worker forever. See :data:`_DEFAULT_GIT_TIMEOUT_S` for
+            why the default is as low as it is.
+        clock: Wall clock backing the unreachable-network cooldown below;
+            injected so tests can control it without a real sleep.
     """
 
-    def __init__(self, executable: str = "git", timeout_s: int = 45) -> None:
+    def __init__(
+        self,
+        executable: str = "git",
+        timeout_s: int = _DEFAULT_GIT_TIMEOUT_S,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self._executable = executable
         self._timeout_s = timeout_s
         self._available: bool | None = None
+        self._clock = clock
+        #: Set once a fetch/clone actually times out; see item 4 and
+        #: :meth:`_network_looks_unreachable`.
+        self._unreachable_until: float | None = None
 
     def available(self) -> bool:
         if self._available is None:
             try:
-                completed = subprocess.run(  # noqa: S603 - fixed argv, no shell
-                    [self._executable, "--version"],
-                    capture_output=True,
-                    text=True,
-                    timeout=self._timeout_s,
-                )
+                completed = _run_git([self._executable, "--version"], None, self._timeout_s)
             except (OSError, subprocess.SubprocessError):
                 self._available = False
             else:
@@ -100,24 +222,37 @@ class SubprocessGitRunner:
         return self._available
 
     def run(self, args: Sequence[str], cwd: Path) -> GitResult:
+        verb = args[0] if args else ""
+        if verb in _NETWORK_VERBS and self._network_looks_unreachable():
+            return GitResult(
+                124,
+                stderr=(
+                    "network looked unreachable a moment ago; skipping "
+                    f"git {verb} to stay responsive (retries automatically "
+                    f"within {_NETWORK_RETRY_COOLDOWN_S:.0f}s)"
+                ),
+            )
         command = [self._executable, *args]
         try:
-            completed = subprocess.run(  # noqa: S603 - argument list, no shell
-                command,
-                cwd=str(cwd),
-                capture_output=True,
-                text=True,
-                timeout=self._timeout_s,
-            )
+            completed = _run_git(command, cwd, self._timeout_s)
         except FileNotFoundError:
             return GitResult(127, stderr=f"'{self._executable}' not found on PATH")
         except subprocess.TimeoutExpired:
+            if verb in _NETWORK_VERBS:
+                self._unreachable_until = self._clock() + _NETWORK_RETRY_COOLDOWN_S
             return GitResult(
                 124, stderr=f"git timed out after {self._timeout_s}s: git {' '.join(args)}"
             )
         except OSError as exc:
             return GitResult(1, stderr=f"could not run git: {exc}")
         return GitResult(completed.returncode, completed.stdout or "", completed.stderr or "")
+
+    def _network_looks_unreachable(self) -> bool:
+        """Whether a network-touching command timed out recently enough that
+        another one is not worth attempting yet -- see item 4."""
+        return (
+            self._unreachable_until is not None and self._clock() < self._unreachable_until
+        )
 
 
 class RepositoryCache:

@@ -51,7 +51,13 @@ class Settings:
         axis_deadzone: Magnitude above which an arcade axis counts as pushed.
             The arcade stick is digital, so 0.5 matches the reference
             ``joystick.py`` from the arcade startercode.
-        network_timeout_s: Per-git-command timeout for background syncing.
+        network_timeout_s: Per-git-command timeout for background syncing, in
+            seconds. Kept low deliberately: a disconnected cabinet pays this
+            once per launchable game at start-up and once more before every
+            launch, so a high value turns "no Wi-Fi" into a long visible
+            stall rather than an instant, honest ``CACHED_OFFLINE``. See
+            ``launcher.cache._DEFAULT_GIT_TIMEOUT_S`` for the fair-day
+            reasoning behind the default.
     """
 
     default_view: ViewMode = ViewMode.CAROUSEL
@@ -61,7 +67,7 @@ class Settings:
     nav_initial_delay_ms: int = 380
     nav_repeat_ms: int = 140
     axis_deadzone: float = 0.5
-    network_timeout_s: int = 45
+    network_timeout_s: int = 8
 
 
 #: Built-in fallbacks used when ``config/launcher.json`` is absent.

@@ -28,14 +28,56 @@ def key_event(key: int, down: bool = True) -> pygame.event.Event:
     )
 
 
-def button_event(button: int) -> pygame.event.Event:
-    return pygame.event.Event(pygame.JOYBUTTONDOWN, button=button, instance_id=0, joy=0)
+def button_event(button: int, instance_id: int = 0) -> pygame.event.Event:
+    return pygame.event.Event(
+        pygame.JOYBUTTONDOWN, button=button, instance_id=instance_id, joy=instance_id
+    )
+
+
+def button_up_event(button: int, instance_id: int = 0) -> pygame.event.Event:
+    return pygame.event.Event(
+        pygame.JOYBUTTONUP, button=button, instance_id=instance_id, joy=instance_id
+    )
 
 
 def axis_event(axis: int, value: float) -> pygame.event.Event:
     return pygame.event.Event(
         pygame.JOYAXISMOTION, axis=axis, value=value, instance_id=0, joy=0
     )
+
+
+class FakeJoystick:
+    """Minimal stand-in for ``pygame.joystick.Joystick``, for arming tests.
+
+    Real hardware answers ``get_button`` immediately from the device itself,
+    independently of window focus, unlike ``pygame.key.get_pressed()`` -- this
+    fake mirrors that by returning whatever the test set, with no dependency
+    on SDL or a real controller.
+    """
+
+    def __init__(self, instance_id: int, numbuttons: int = 6) -> None:
+        self._instance_id = instance_id
+        self._numbuttons = numbuttons
+
+    def init(self) -> None:
+        pass
+
+    def quit(self) -> None:
+        pass
+
+    def get_instance_id(self) -> int:
+        return self._instance_id
+
+    def get_numbuttons(self) -> int:
+        return self._numbuttons
+
+    def get_button(self, button: int) -> bool:  # pragma: no cover - unused seam
+        # _sync_exit_arming never reaches this in these tests: ScriptedSession
+        # overrides _is_button_held instead, which is the only caller.
+        return False
+
+    def get_name(self) -> str:
+        return f"fake-joystick-{self._instance_id}"
 
 
 class ScriptedSession(GallerySession):
@@ -51,10 +93,29 @@ class ScriptedSession(GallerySession):
     #: One frame at 60 Hz.  Deterministic, whatever the host is doing.
     FRAME_MS = 16
 
-    def __init__(self, *args, script, **kwargs) -> None:
+    def __init__(
+        self,
+        *args,
+        script,
+        held_keys: frozenset[int] = frozenset(),
+        held_buttons: frozenset[tuple[int, int]] = frozenset(),
+        joysticks: tuple[FakeJoystick, ...] = (),
+        **kwargs,
+    ) -> None:
         super().__init__(*args, **kwargs)
         self._script = list(script)
         self.frames = 0
+        self._joystick_fakes = list(joysticks)
+        # Ground truth for the arming seam below (_is_key_held/_is_button_held):
+        # starts from whatever the test says is already down the instant the
+        # session opens -- standing in for a key or button still physically
+        # held from before the transition -- then tracks every KEYUP/KEYDOWN/
+        # JOYBUTTONUP/JOYBUTTONDOWN the script plays. A headless dummy SDL
+        # driver never reflects these synthetic events in real key/joystick
+        # state, which is exactly why this seam exists rather than trusting
+        # pygame.key.get_pressed()/Joystick.get_button() in tests.
+        self._synthetic_keys_down: set[int] = set(held_keys)
+        self._synthetic_buttons_down: set[tuple[int, int]] = set(held_buttons)
 
     def _tick(self, clock):  # type: ignore[override]
         return self.FRAME_MS
@@ -64,10 +125,40 @@ class ScriptedSession(GallerySession):
         if not self._script:
             # Safety net: never hang a test if the script forgot to exit.
             return [key_event(pygame.K_ESCAPE)]
-        return self._script.pop(0)
+        batch = self._script.pop(0)
+        for event in batch:
+            if event.type == pygame.KEYDOWN:
+                self._synthetic_keys_down.add(event.key)
+            elif event.type == pygame.KEYUP:
+                self._synthetic_keys_down.discard(event.key)
+            elif event.type == pygame.JOYBUTTONDOWN:
+                self._synthetic_buttons_down.add((event.instance_id, event.button))
+            elif event.type == pygame.JOYBUTTONUP:
+                self._synthetic_buttons_down.discard((event.instance_id, event.button))
+        return batch
+
+    def _joystick_count(self):  # type: ignore[override]
+        return len(self._joystick_fakes)
+
+    def _open_joystick(self, index: int):  # type: ignore[override]
+        return self._joystick_fakes[index]
+
+    def _is_key_held(self, key: int) -> bool:  # type: ignore[override]
+        return key in self._synthetic_keys_down
+
+    def _is_button_held(self, instance_id: int, button: int) -> bool:  # type: ignore[override]
+        return (instance_id, button) in self._synthetic_buttons_down
 
 
-def session(script, *, states=None, default_view=ViewMode.GRID) -> ScriptedSession:
+def session(
+    script,
+    *,
+    states=None,
+    default_view=ViewMode.GRID,
+    held_keys=frozenset(),
+    held_buttons=frozenset(),
+    joysticks=(),
+) -> ScriptedSession:
     settings = Settings(
         default_view=default_view, fullscreen=False, frame_rate=60, sync_on_start=False
     )
@@ -79,7 +170,16 @@ def session(script, *, states=None, default_view=ViewMode.GRID) -> ScriptedSessi
         )
         for game in MANIFEST
     }
-    return ScriptedSession(MANIFEST, settings, live, None, script=script)
+    return ScriptedSession(
+        MANIFEST,
+        settings,
+        live,
+        None,
+        script=script,
+        held_keys=held_keys,
+        held_buttons=held_buttons,
+        joysticks=joysticks,
+    )
 
 
 class MappingTests(unittest.TestCase):
@@ -275,6 +375,27 @@ class ScriptedSync:
         return published
 
 
+class NeverSettlingSync:
+    """A sync double that never resolves a request -- stands in for a
+    background worker stuck retrying a dead or absent network. Exercises
+    the bound on the pre-launch refresh (item 2 of the offline-speed fix):
+    the gallery must not wait on this forever, only up to
+    ``_LAUNCH_REFRESH_TIMEOUT_MS``.
+    """
+
+    def __init__(self) -> None:
+        self.requested: list[str] = []
+
+    def request_all(self, entries) -> int:  # pragma: no cover - unused here
+        return len(list(entries))
+
+    def request(self, entry) -> None:
+        self.requested.append(entry.id)
+
+    def drain(self) -> list[GameState]:
+        return []
+
+
 def _states_for(status_for_launchable: GameStatus) -> dict[str, GameState]:
     return {
         game.id: GameState(
@@ -347,6 +468,27 @@ class PreLaunchRefreshTests(unittest.TestCase):
         )
         self.assertIs(outcome.action, UiAction.QUIT)
 
+    def test_launch_proceeds_once_the_refresh_bound_elapses_instead_of_hanging(
+        self,
+    ) -> None:
+        """Item 2 of the offline-speed fix: a launch must never wait the
+        full network timeout for its own pre-flight refresh. The card was
+        already confirmed playable the instant Play was pressed, so once the
+        bound (:data:`~launcher.gallery._LAUNCH_REFRESH_TIMEOUT_MS`) elapses
+        without an answer, the visitor must be handed the cached copy rather
+        than stand at a cabinet that looks frozen behind an ``UPDATING``
+        badge."""
+        game_id = MANIFEST[0].id
+        sync = NeverSettlingSync()
+        # 2000ms bound / 16ms-per-frame = 125 frames; this script is much
+        # longer so a regression (no bound at all) would run out the clock
+        # and fall through to the safety net's Escape instead of launching.
+        script = [[button_event(BUTTON_LAUNCH)]] + [[] for _ in range(400)]
+        _, outcome = self.run_session(sync, script=script)
+        self.assertIs(outcome.action, UiAction.LAUNCH)
+        self.assertEqual(outcome.game_id, game_id)
+        self.assertEqual(sync.requested, [game_id])
+
     def test_offline_mode_still_confirms_without_any_network_call(self) -> None:
         """Offline mode (``sync_on_start`` off / ``--no-sync``) re-verifies the
         disk before launch through the same path, but the double standing in
@@ -364,17 +506,20 @@ class PreLaunchRefreshTests(unittest.TestCase):
         self.assertIs(states[game_id].status, GameStatus.CACHED_OFFLINE)
 
 
-class ExitSettleTests(unittest.TestCase):
+class ExitArmingTests(unittest.TestCase):
     """Regression (item 1): a stale Esc/P1 spanning the session transition
     must not bounce the visitor straight past the gallery.
 
     A game quits itself on Esc/P1; the instant it exits, the gallery reopens
     and starts pumping events again. If that key or button is still down --
     it is, after all, the exact input that just closed the game -- the fresh
-    session must settle rather than read it as "leave the gallery too".
-    These scripts hold the exit input down for far longer than a human
-    reaction time to a fresh cabinet screen, standing in for a queued or
-    still-held press across the transition.
+    session must not read it as "leave the gallery too", no matter how long
+    it stays held: arming (see ``GallerySession._sync_exit_arming`` and
+    ``_exit_is_suppressed``) requires a positively observed release, not a
+    fixed settle window, so these scripts hold the exit input down for far
+    longer than any settle window used to be and it still must not fire.
+    Once released and pressed again, a fresh press must quit promptly --
+    "solved" must not mean "Escape stopped working in the gallery".
     """
 
     def run_session(self, script, **kwargs):
@@ -383,33 +528,70 @@ class ExitSettleTests(unittest.TestCase):
         self.addCleanup(pygame.quit)
         return game, outcome
 
-    def test_a_stale_escape_does_not_instantly_quit(self) -> None:
-        script = [[key_event(pygame.K_ESCAPE)] for _ in range(40)]
-        game, outcome = self.run_session(script)
+    def test_a_key_already_held_at_open_does_not_quit_until_released_and_pressed_again(
+        self,
+    ) -> None:
+        """Reproduces the client's report directly: Escape is already held
+        (physically down) the instant the session opens, and stays down for
+        far longer than a human reaction time -- standing in for the exact
+        key that just closed the previous game, still under a visitor's
+        finger. It must never quit while that hold continues. Only a
+        genuine release followed by a fresh press may quit, and that must
+        happen immediately, not after some further delay.
+        """
+        held_frames = 40
+        script = (
+            [[key_event(pygame.K_ESCAPE)] for _ in range(held_frames)]
+            + [[key_event(pygame.K_ESCAPE, down=False)]]
+            + [[key_event(pygame.K_ESCAPE)]]
+        )
+        game, outcome = self.run_session(script, held_keys=frozenset({pygame.K_ESCAPE}))
         self.assertIs(outcome.action, UiAction.QUIT)
-        self.assertGreater(
+        self.assertEqual(
             game.frames,
-            10,
-            "a stale Escape must settle before it is honoured, not fire on "
-            "the very first frames back in the gallery",
+            held_frames + 2,
+            "must not quit while Escape is still held, and must quit on the "
+            "very frame of the first fresh press after release",
         )
 
-    def test_a_stale_exit_button_does_not_instantly_quit(self) -> None:
-        script = [[button_event(BUTTON_EXIT)] for _ in range(40)]
-        game, outcome = self.run_session(script)
+    def test_a_button_already_held_at_open_does_not_quit_until_released_and_pressed_again(
+        self,
+    ) -> None:
+        """The joystick half of the same regression: P1 (button 5) already
+        held when the session opens."""
+        held_frames = 40
+        script = (
+            [[button_event(BUTTON_EXIT)] for _ in range(held_frames)]
+            + [[button_up_event(BUTTON_EXIT)]]
+            + [[button_event(BUTTON_EXIT)]]
+        )
+        game, outcome = self.run_session(
+            script,
+            held_buttons=frozenset({(0, BUTTON_EXIT)}),
+            joysticks=(FakeJoystick(instance_id=0),),
+        )
         self.assertIs(outcome.action, UiAction.QUIT)
-        self.assertGreater(
+        self.assertEqual(
             game.frames,
-            10,
-            "a stale P1 must settle before it is honoured, same as Escape",
+            held_frames + 2,
+            "must not quit while P1 is still held, and must quit on the very "
+            "frame of the first fresh press after release",
         )
 
-    def test_a_genuine_escape_still_quits_within_the_settle_window(self) -> None:
-        """The settle window is short: an ordinary press still works quickly."""
-        script = [[key_event(pygame.K_ESCAPE)] for _ in range(40)]
-        game, outcome = self.run_session(script)
+    def test_a_genuine_escape_quits_on_the_very_first_frame(self) -> None:
+        """The overwhelmingly common case -- Escape was not held at all when
+        the session opened -- must arm immediately: nothing here may impose
+        an artificial delay on an ordinary press."""
+        game, outcome = self.run_session([[key_event(pygame.K_ESCAPE)]])
         self.assertIs(outcome.action, UiAction.QUIT)
-        self.assertLess(game.frames, 40, "the settle window must not hang")
+        self.assertEqual(game.frames, 1, "an ordinary press must not be delayed")
+
+    def test_a_genuine_button_quits_on_the_very_first_frame(self) -> None:
+        game, outcome = self.run_session(
+            [[button_event(BUTTON_EXIT)]], joysticks=(FakeJoystick(instance_id=0),)
+        )
+        self.assertIs(outcome.action, UiAction.QUIT)
+        self.assertEqual(game.frames, 1, "an ordinary press must not be delayed")
 
 
 class SdlLifecycleTests(unittest.TestCase):

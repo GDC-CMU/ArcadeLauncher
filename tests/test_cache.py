@@ -9,8 +9,16 @@ from __future__ import annotations
 
 import subprocess
 import unittest
+from pathlib import Path
+from unittest import mock
 
-from launcher.cache import GitResult, RepositoryCache
+from launcher.cache import (
+    GitResult,
+    RepositoryCache,
+    SubprocessGitRunner,
+    _DEFAULT_GIT_TIMEOUT_S,
+    _NETWORK_RETRY_COOLDOWN_S,
+)
 from launcher.errors import NotLaunchableError
 from launcher.paths import default_cache_root
 from launcher.status import GameStatus
@@ -197,6 +205,151 @@ class RealGitTests(TempDirCase):
         )
         state = self.cache.sync(broken)
         self.assertIs(state.status, GameStatus.UNAVAILABLE)
+
+
+def _fake_clock(*values: float):
+    """A clock stub that returns *values* in order, then repeats the last
+    one forever -- so a test can't crash with ``StopIteration`` just because
+    it (harmlessly) reads the clock one time more than expected."""
+    import itertools
+
+    ticks = itertools.chain(values, itertools.repeat(values[-1]))
+    return lambda: next(ticks)
+
+
+class _FakePopen:
+    """Stand-in for ``subprocess.Popen`` used by :func:`launcher.cache._run_git`.
+
+    Mirrors exactly the two calls that function makes: an initial
+    ``communicate(timeout=...)``, which raises ``TimeoutExpired`` once if
+    *timeout_once* is set (like a real hung process would, right up until
+    something kills it), and a second, timeout-less ``communicate()`` call
+    afterwards to drain whatever the pipes already held -- which always
+    succeeds, exactly like draining an already-dead process's pipes does.
+    """
+
+    def __init__(
+        self, *, returncode: int = 0, stdout: str = "", stderr: str = "", timeout_once: bool = False
+    ) -> None:
+        self.pid = 4242
+        self.returncode = returncode
+        self._stdout = stdout
+        self._stderr = stderr
+        self._timeout_once = timeout_once
+        self.communicate_calls = 0
+        self.communicate_timeout: float | None = None
+
+    def communicate(self, timeout: float | None = None):
+        self.communicate_calls += 1
+        if self.communicate_calls == 1:
+            self.communicate_timeout = timeout
+        if self._timeout_once and self.communicate_calls == 1:
+            raise subprocess.TimeoutExpired(cmd=["git"], timeout=timeout)
+        return self._stdout, self._stderr
+
+    def kill(self) -> None:  # pragma: no cover - unused seam
+        pass
+
+
+class SubprocessGitRunnerTests(unittest.TestCase):
+    """The real git runner's network-safety behaviour (the offline-speed
+    fix: items 1, 3 and 4). Exercised entirely through a mocked
+    ``subprocess.Popen`` -- nothing here touches a real process or network.
+    ``_kill_process_tree`` is mocked out too: it is OS-specific (``taskkill``
+    on Windows, a process-group signal elsewhere) and is exercised for real
+    by the manual offline measurement described in the pull request, not by
+    this automated suite.
+    """
+
+    def test_default_timeout_is_short_for_a_fair_day(self) -> None:
+        runner = SubprocessGitRunner()
+        self.assertEqual(runner._timeout_s, _DEFAULT_GIT_TIMEOUT_S)
+        self.assertLessEqual(
+            _DEFAULT_GIT_TIMEOUT_S,
+            10,
+            "a disconnected cabinet pays this once per launchable game at "
+            "start-up and again before every launch -- it must stay low",
+        )
+
+    def test_run_disables_credential_prompts_and_uses_the_configured_timeout(
+        self,
+    ) -> None:
+        runner = SubprocessGitRunner(timeout_s=7)
+        fake = _FakePopen()
+        with mock.patch("launcher.cache.subprocess.Popen", return_value=fake) as popen:
+            runner.run(["fetch", "origin", "main"], Path("checkout"))
+
+        self.assertEqual(fake.communicate_timeout, 7)
+        _, kwargs = popen.call_args
+        self.assertEqual(kwargs["env"]["GIT_TERMINAL_PROMPT"], "0")
+        self.assertIn("GIT_ASKPASS", kwargs["env"])
+
+    def test_a_timed_out_fetch_makes_the_next_one_fail_fast(self) -> None:
+        """Item 4: the first timeout in a session is the expensive one; a
+        second network-touching command within the cooldown must not pay it
+        again -- ``subprocess.Popen`` must not even be invoked a second
+        time."""
+        runner = SubprocessGitRunner(clock=_fake_clock(0.0, 5.0))
+        with (
+            mock.patch(
+                "launcher.cache.subprocess.Popen",
+                return_value=_FakePopen(timeout_once=True),
+            ) as popen,
+            mock.patch("launcher.cache._kill_process_tree"),
+        ):
+            first = runner.run(["fetch", "origin", "main"], Path("checkout"))
+        self.assertFalse(first.ok)
+        self.assertEqual(popen.call_count, 1)
+
+        with mock.patch("launcher.cache.subprocess.Popen") as popen_again:
+            second = runner.run(["fetch", "origin", "main"], Path("checkout"))
+        self.assertFalse(second.ok)
+        self.assertEqual(
+            popen_again.call_count,
+            0,
+            "a network command inside the cooldown must fail fast, not "
+            "reattempt and re-pay the timeout",
+        )
+
+    def test_the_cooldown_expires_and_the_network_is_tried_again(self) -> None:
+        runner = SubprocessGitRunner(clock=_fake_clock(0.0, _NETWORK_RETRY_COOLDOWN_S + 40.0))
+        with (
+            mock.patch(
+                "launcher.cache.subprocess.Popen",
+                return_value=_FakePopen(timeout_once=True),
+            ),
+            mock.patch("launcher.cache._kill_process_tree"),
+        ):
+            runner.run(["fetch", "origin", "main"], Path("checkout"))
+
+        with mock.patch(
+            "launcher.cache.subprocess.Popen", return_value=_FakePopen()
+        ) as popen_again:
+            second = runner.run(["fetch", "origin", "main"], Path("checkout"))
+        self.assertTrue(second.ok)
+        self.assertEqual(popen_again.call_count, 1, "the cooldown must eventually expire")
+
+    def test_local_only_commands_are_never_affected_by_the_cooldown(self) -> None:
+        """``rev-parse``/``reset`` are purely local; a dead network must not
+        also disarm them, or a checkout that already fetched successfully
+        this session could not even report its own commit."""
+        runner = SubprocessGitRunner(clock=_fake_clock(0.0))
+        with (
+            mock.patch(
+                "launcher.cache.subprocess.Popen",
+                return_value=_FakePopen(timeout_once=True),
+            ),
+            mock.patch("launcher.cache._kill_process_tree"),
+        ):
+            runner.run(["fetch", "origin", "main"], Path("checkout"))
+
+        with mock.patch(
+            "launcher.cache.subprocess.Popen",
+            return_value=_FakePopen(stdout="abc1234\n"),
+        ) as popen_again:
+            result = runner.run(["rev-parse", "--short", "HEAD"], Path("checkout"))
+        self.assertTrue(result.ok)
+        self.assertEqual(popen_again.call_count, 1)
 
 
 @unittest.skipUnless(git_available(), "git is not installed")

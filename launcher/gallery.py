@@ -70,16 +70,15 @@ _VIEW_COMMANDS: dict[Command, ViewMode] = {
 
 _TOAST_MS = 1600
 
-#: How long after a session opens Command.EXIT is refused outright.
-#:
-#: A game quits itself with Esc or P1 (button 5); the instant it exits, this
-#: process reopens the display and starts pumping events again. If the visitor
-#: is still physically holding that same key or button -- entirely plausible,
-#: since it is the same input that just closed the game -- the freshly opened
-#: gallery must not read that as "leave the gallery too" and bounce the
-#: visitor straight past it to the arcade menu. A window this short is
-#: imperceptible as a delay but comfortably outlasts a human release.
-_EXIT_SETTLE_MS = 300
+#: Bound on how long a launch waits for its own pre-flight refresh (see
+#: :meth:`GallerySession._settle_launch`) before giving up and starting the
+#: copy already confirmed playable on disk. On a disconnected cabinet the
+#: alternative is a visitor watching "STILL SYNCING" for however long the
+#: network stack takes to give up -- at a club fair that reads as a frozen
+#: machine, not a loading game. A couple of seconds is enough for a healthy
+#: network to report a fresher commit but short enough that a slow or absent
+#: one never costs a visitor their Play press.
+_LAUNCH_REFRESH_TIMEOUT_MS = 2000
 
 
 def _never() -> bool:
@@ -127,11 +126,20 @@ class GallerySession:
         )
         self._joysticks: dict[int, pygame.joystick.Joystick] = {}
         self._should_stop = should_stop if should_stop is not None else _never
-        #: Keys/buttons already down when this session opened, mapped to
-        #: Command.EXIT; suppressed until released so a key still physically
-        #: held from before the transition cannot fire an immediate exit.
-        self._held_exit_keys: set[int] = set()
-        self._held_exit_buttons: set[tuple[int, int]] = set()
+        #: Exit-mapped keys/buttons *not yet* confirmed safe to fire -- see
+        #: item 1 and :meth:`_sync_exit_arming`/:meth:`_exit_is_suppressed`.
+        #: Every session opens with every exit-mapped key disarmed (there is
+        #: always exactly one: Escape) and every currently-attached
+        #: joystick's exit button disarmed too, regardless of whether either
+        #: is actually held right now -- that determination is never trusted
+        #: to a single sample taken this early (see the docstring on
+        #: :meth:`_sync_exit_arming` for why). A source arms -- is removed
+        #: from these sets -- the moment we positively observe it is *not*
+        #: held: either a KEYUP/JOYBUTTONUP for it, or a later frame's
+        #: recheck. Until then an EXIT command from it is ignored no matter
+        #: how long it is held; once armed, EXIT is immediate.
+        self._disarmed_exit_keys: set[int] = set()
+        self._disarmed_exit_buttons: set[tuple[int, int]] = set()
 
     # ------------------------------------------------------------------
     # Entry point (the supervisor's UiFactory)
@@ -171,16 +179,19 @@ class GallerySession:
 
         self.navigation.reset()
         self._joysticks.clear()
-        self._held_exit_keys.clear()
-        self._held_exit_buttons.clear()
-        for index in range(pygame.joystick.get_count()):
+        # Disarmed by default -- see the attribute docstring in __init__.
+        self._disarmed_exit_keys = {
+            key for key, command in KEY_COMMANDS.items() if command is Command.EXIT
+        }
+        self._disarmed_exit_buttons = set()
+        for index in range(self._joystick_count()):
             self._attach_joystick(index)
 
         # A previous session (or the child game that just exited) can leave
         # events sitting in SDL's queue; none of them describe *this* session
         # and must never be read as an immediate command -- see item 1.
         pygame.event.clear()
-        self._prime_held_exit_keys()
+        self._sync_exit_arming()
 
     def _release_sdl(self) -> None:
         """Give the display and every joystick back to the operating system.
@@ -209,6 +220,21 @@ class GallerySession:
         pygame.quit()
         _log.debug("SDL released")
 
+    def _joystick_count(self) -> int:
+        """How many joystick devices to enumerate at open.
+
+        A seam: tests stand in a fake joystick without a real SDL device, so
+        this (and :meth:`_open_joystick`) is what they override instead of
+        touching ``pygame.joystick`` directly.
+        """
+        return pygame.joystick.get_count()
+
+    def _open_joystick(self, index: int) -> pygame.joystick.Joystick:
+        """Open and initialise the device at *index*. See :meth:`_joystick_count`."""
+        stick = pygame.joystick.Joystick(index)
+        stick.init()
+        return stick
+
     def _attach_joystick(self, index: int) -> None:
         """Open and register the device at *index*, at most once.
 
@@ -222,8 +248,7 @@ class GallerySession:
         device is discovered.
         """
         try:
-            stick = pygame.joystick.Joystick(index)
-            stick.init()
+            stick = self._open_joystick(index)
         except pygame.error as exc:
             _log.warning("joystick %s could not be opened: %s", index, exc)
             return
@@ -241,26 +266,62 @@ class GallerySession:
 
         self._joysticks[instance_id] = stick
         self.navigation.axes.attach(instance_id)
-        if stick.get_numbuttons() > BUTTON_EXIT and stick.get_button(BUTTON_EXIT):
-            # The exit button was already down the instant this stick was
-            # opened -- almost certainly the same press that just closed the
-            # game. Suppress it until it is released; see item 1.
-            self._held_exit_buttons.add((instance_id, BUTTON_EXIT))
+        # Disarmed by default, same as every exit-mapped key -- see item 1
+        # and the attribute docstring in __init__. _sync_exit_arming (called
+        # right after this loop in _open_display, and every frame after)
+        # arms it immediately if the button turns out not to be held.
+        self._disarmed_exit_buttons.add((instance_id, BUTTON_EXIT))
         _log.info("joystick attached: %s (instance %s)", stick.get_name(), instance_id)
 
-    def _prime_held_exit_keys(self) -> None:
-        """Note any exit-mapped key already down the instant the session opens.
+    def _is_key_held(self, key: int) -> bool:
+        """Ground truth: is *key* physically down right now?
 
-        ``pygame.key.get_pressed()`` reflects real key state independently of
-        the event queue, so this catches a physically-held key even though
-        :meth:`_open_display` has just cleared any stale queued events.
+        Used only by :meth:`_sync_exit_arming` as the fallback arming path --
+        the primary one is the KEYUP event, handled directly in the loop.
         """
         pressed = pygame.key.get_pressed()
-        self._held_exit_keys = {
-            key
-            for key, command in KEY_COMMANDS.items()
-            if command is Command.EXIT and key < len(pressed) and pressed[key]
-        }
+        return key < len(pressed) and bool(pressed[key])
+
+    def _is_button_held(self, instance_id: int, button: int) -> bool:
+        """Ground truth: is *button* on joystick *instance_id* down right now?
+
+        Used only by :meth:`_sync_exit_arming`, same role as
+        :meth:`_is_key_held`. A joystick that has since been detached counts
+        as not held -- there is nothing left to release.
+        """
+        stick = self._joysticks.get(instance_id)
+        if stick is None:
+            return False
+        return button < stick.get_numbuttons() and bool(stick.get_button(button))
+
+    def _sync_exit_arming(self) -> None:
+        """Arm every exit-mapped key/button not yet confirmed released.
+
+        This is the fallback half of arm-on-release (item 1): the KEYUP/
+        JOYBUTTONUP handling in the loop is the fast, common path, and arms
+        the instant SDL reports a release. This exists for when that event
+        never arrives -- for example a window losing input focus while the
+        key is up, which can mean SDL never emits the KEYUP at all -- and,
+        just as importantly, for the very first frame of a source that was
+        never held in the first place: the overwhelmingly common case, and
+        one that must arm immediately, not after a fixed delay.
+
+        ``pygame.key.get_pressed()`` is populated by SDL's normal event
+        pumping, not read independently of it -- events are pumped here
+        before any of it is sampled, unlike the single early read this
+        replaced, which ran before the new window had necessarily gained
+        input focus and could report nothing held even while a key was
+        genuinely still down.
+        """
+        if not self._disarmed_exit_keys and not self._disarmed_exit_buttons:
+            return
+        pygame.event.pump()
+        for key in list(self._disarmed_exit_keys):
+            if not self._is_key_held(key):
+                self._disarmed_exit_keys.discard(key)
+        for pair in list(self._disarmed_exit_buttons):
+            if not self._is_button_held(*pair):
+                self._disarmed_exit_buttons.discard(pair)
 
     def _detach_joystick(self, instance_id: int) -> None:
         stick = self._joysticks.pop(instance_id, None)
@@ -270,7 +331,7 @@ class GallerySession:
             except pygame.error as exc:
                 _log.debug("joystick %s already gone: %s", instance_id, exc)
         self.navigation.axes.detach(instance_id)
-        self._held_exit_buttons.discard((instance_id, BUTTON_EXIT))
+        self._disarmed_exit_buttons.discard((instance_id, BUTTON_EXIT))
         _log.info("joystick detached: instance %s", instance_id)
 
     # ------------------------------------------------------------------
@@ -299,10 +360,11 @@ class GallerySession:
         grid_scroll = grid_target_scroll(index, len(self.manifest))
         focus_ms = 0
         elapsed_ms = 0
-        #: ``(game_id, index)`` while a launch is waiting on its own
-        #: immediately-before-launch refresh; see the LAUNCH handling below
-        #: and :meth:`_settle_launch`.
-        pending_launch: tuple[str, int] | None = None
+        #: ``(game_id, index, deadline_ms)`` while a launch is waiting on its
+        #: own immediately-before-launch refresh; see the LAUNCH handling
+        #: below and :meth:`_settle_launch`. ``deadline_ms`` bounds that wait
+        #: against ``elapsed_ms`` -- see :data:`_LAUNCH_REFRESH_TIMEOUT_MS`.
+        pending_launch: tuple[str, int, int] | None = None
 
         if self.sync is not None and self.settings.sync_on_start:
             self.sync.request_all(self.manifest.launchable)
@@ -319,6 +381,7 @@ class GallerySession:
             elapsed_ms += delta_ms
             focus_ms += delta_ms
             self._absorb_sync()
+            self._sync_exit_arming()
 
             if pending_launch is not None:
                 outcome, refusal = self._settle_launch(pending_launch, mode, elapsed_ms)
@@ -343,17 +406,17 @@ class GallerySession:
                 elif event.type == pygame.KEYDOWN and event.key in KEY_DIRECTIONS:
                     self.navigation.press_key(KEY_DIRECTIONS[event.key])
                 elif event.type == pygame.KEYUP:
-                    self._held_exit_keys.discard(event.key)
+                    self._disarmed_exit_keys.discard(event.key)
                     if event.key in KEY_DIRECTIONS:
                         self.navigation.release_key(KEY_DIRECTIONS[event.key])
                 elif event.type == pygame.JOYBUTTONUP:
-                    self._held_exit_buttons.discard((event.instance_id, event.button))
+                    self._disarmed_exit_buttons.discard((event.instance_id, event.button))
 
                 if command is None:
                     continue
                 if command is Command.EXIT:
-                    if self._exit_is_suppressed(event, elapsed_ms):
-                        _log.debug("ignoring exit: stale or settling input")
+                    if self._exit_is_suppressed(event):
+                        _log.debug("ignoring exit: not yet armed")
                         continue
                     _log.info("visitor asked to leave the gallery")
                     return self._outcome(UiAction.QUIT, mode, index)
@@ -375,7 +438,11 @@ class GallerySession:
                             # background worker (see cache.sync), so the
                             # gallery keeps rendering while it happens; the
                             # card's own badge flips to UPDATING to show it.
-                            pending_launch = (entry.id, index)
+                            pending_launch = (
+                                entry.id,
+                                index,
+                                elapsed_ms + _LAUNCH_REFRESH_TIMEOUT_MS,
+                            )
                             self.sync.request(entry)
                         else:
                             return self._outcome(UiAction.LAUNCH, mode, index, entry.id)
@@ -434,26 +501,24 @@ class GallerySession:
             return command_for_button(event.button)
         return None
 
-    def _exit_is_suppressed(self, event: pygame.event.Event, elapsed_ms: int) -> bool:
+    def _exit_is_suppressed(self, event: pygame.event.Event) -> bool:
         """Whether an EXIT command must be ignored -- see item 1.
 
-        Two independent guards, either of which is enough to suppress:
-
-        * The settle window: for a short moment after the session opens, no
-          EXIT fires at all, so a KEYDOWN that was already queued (or that SDL
-          synthesises when the window regains input focus) cannot bounce the
-          visitor straight past a gallery they never got to see.
-        * The held-since-open check: a key or button recorded as already down
-          in :meth:`_open_display` stays suppressed until its release, which
-          catches a press that spans the transition even if it arrives after
-          the settle window (a long hold, or a slow-to-exit child process).
+        Arming, not timing, decides this: a key or button that was already
+        down when the session opened -- or whose release has not yet been
+        positively observed since -- is disarmed, and an EXIT command from a
+        disarmed source is ignored no matter how long it has been held. That
+        covers a press spanning the transition regardless of how long the
+        hold lasts, including one that outlasts a fixed settle window (a slow
+        window-focus change, or a slow-to-exit child process). Once a source
+        is armed (see :meth:`_sync_exit_arming` and the KEYUP/JOYBUTTONUP
+        handling in the loop), EXIT from it is immediate: a genuine press is
+        never delayed or swallowed.
         """
-        if elapsed_ms < _EXIT_SETTLE_MS:
-            return True
         if event.type == pygame.KEYDOWN:
-            return event.key in self._held_exit_keys
+            return event.key in self._disarmed_exit_keys
         if event.type == pygame.JOYBUTTONDOWN:
-            return (event.instance_id, event.button) in self._held_exit_buttons
+            return (event.instance_id, event.button) in self._disarmed_exit_buttons
         return False
 
     @staticmethod
@@ -504,25 +569,39 @@ class GallerySession:
         return Toast(headline, detail, started_ms=now_ms, duration_ms=_TOAST_MS)
 
     def _settle_launch(
-        self, pending: tuple[str, int], mode: ViewMode, now_ms: int
+        self, pending: tuple[str, int, int], mode: ViewMode, now_ms: int
     ) -> tuple[UiOutcome | None, Toast | None]:
         """Resolve a launch that is waiting on its own pre-flight refresh.
 
         Returns ``(outcome, None)`` once the refresh landed on something
-        playable, ``(None, toast)`` once it landed on something that is not,
-        or ``(None, None)`` while the background worker is still on it -- in
-        which case the caller keeps waiting and the card's own ``UPDATING``
-        badge (set by :meth:`~launcher.sync.SyncService.request`) is the only
-        visible sign anything is happening.
+        playable -- or once ``deadline_ms`` passes while the worker is still
+        on it, in which case this launches the copy already on disk rather
+        than making a visitor wait on the network (see
+        :data:`_LAUNCH_REFRESH_TIMEOUT_MS`; a card only ever reaches this
+        method already confirmed playable, see the LAUNCH handling in
+        :meth:`_loop`). Returns ``(None, toast)`` once the refresh lands on
+        something that is not playable, or ``(None, None)`` while the
+        background worker is still on it and the deadline has not passed --
+        in which case the caller keeps waiting and the card's own
+        ``UPDATING`` badge (set by
+        :meth:`~launcher.sync.SyncService.request`) is the only visible sign
+        anything is happening.
         """
-        game_id, index = pending
+        game_id, index, deadline_ms = pending
         current = self.states.get(game_id)
-        if current is None or current.status.is_busy:
-            return None, None
-        if current.status.is_playable:
+        if current is not None and not current.status.is_busy:
+            if current.status.is_playable:
+                return self._outcome(UiAction.LAUNCH, mode, index, game_id), None
+            entry = self.manifest.by_id(game_id)
+            return None, self._refusal(entry, current.status, now_ms)
+        if now_ms >= deadline_ms:
+            _log.info(
+                "pre-launch refresh for %s did not settle in time; launching "
+                "the cached copy instead of making the visitor wait",
+                game_id,
+            )
             return self._outcome(UiAction.LAUNCH, mode, index, game_id), None
-        entry = self.manifest.by_id(game_id)
-        return None, self._refusal(entry, current.status, now_ms)
+        return None, None
 
     def _absorb_sync(self) -> None:
         """Fold any finished background sync results into the live state map."""

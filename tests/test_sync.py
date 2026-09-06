@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
+import main as entrypoint
 from launcher.cache import GitResult, RepositoryCache
+from launcher.settings import Settings
 from launcher.status import GameStatus
+from launcher.supervisor import UiAction, UiOutcome
 from launcher.sync import SyncService, initial_states
 
 from support import (
@@ -95,7 +99,54 @@ class SyncServiceTests(TempDirCase):
             sync.wait_idle()
             results = sync.drain()
         self.assertEqual(self.runner.verbs(), [])
+        self.assertTrue(all("GitHub" not in state.detail for state in results))
         self.assertIs(self._final(results, "streetfighter").status, GameStatus.UNAVAILABLE)
+
+    def test_duplicate_queued_requests_are_coalesced(self) -> None:
+        sync = SyncService(self.cache)
+        game = self.manifest.launchable[0]
+        self.assertTrue(sync.request(game))
+        self.assertFalse(sync.request(game))
+        self.assertEqual(sync.request_all(self.manifest.launchable), 0)
+        with sync:
+            self.assertTrue(sync.wait_idle())
+            results = sync.drain()
+        self.assertEqual(self.runner.verbs().count("clone"), 1)
+        self.assertEqual(sum(state.status is GameStatus.UPDATING for state in results), 1)
+
+    def test_completed_games_are_not_checked_again_in_the_same_service(self) -> None:
+        with SyncService(self.cache) as sync:
+            self.assertEqual(sync.request_all(self.manifest.launchable), 1)
+            self.assertTrue(sync.wait_idle())
+            sync.drain()
+            self.assertEqual(sync.request_all(self.manifest.launchable), 0)
+            self.assertEqual(sync.drain(), [])
+        self.assertEqual(self.runner.verbs(), ["clone", "rev-parse"])
+
+    def test_failed_checks_are_not_retried_on_every_gallery_return(self) -> None:
+        self.runner.results["clone"] = GitResult(128, stderr="offline")
+        with SyncService(self.cache) as sync:
+            sync.request_all(self.manifest.launchable)
+            self.assertTrue(sync.wait_idle())
+            self.assertEqual(sync.request_all(self.manifest.launchable), 0)
+        self.assertEqual(self.runner.verbs().count("clone"), 1)
+
+    def test_new_service_checks_the_same_checkout_again(self) -> None:
+        for _ in range(2):
+            with SyncService(self.cache) as sync:
+                self.assertEqual(sync.request_all(self.manifest.launchable), 1)
+                self.assertTrue(sync.wait_idle())
+        self.assertEqual(self.runner.verbs().count("clone"), 1)
+        self.assertEqual(self.runner.verbs().count("fetch"), 1)
+
+    def test_offline_existing_copy_is_usable_without_git(self) -> None:
+        self._materialise(self.cache.checkout_path(self.manifest.launchable[0]))
+        with SyncService(self.cache, online=False) as sync:
+            sync.request_all(self.manifest.launchable)
+            self.assertTrue(sync.wait_idle())
+            results = sync.drain()
+        self.assertEqual(self.runner.verbs(), [])
+        self.assertIs(self._final(results, "streetfighter").status, GameStatus.CACHED_OFFLINE)
 
     def test_failures_become_states_not_exceptions(self) -> None:
         runner = FakeGitRunner({"clone": GitResult(128, stderr="fatal: no network")})
@@ -116,6 +167,42 @@ class SyncServiceTests(TempDirCase):
     def test_drain_is_empty_before_any_request(self) -> None:
         with SyncService(self.cache) as sync:
             self.assertEqual(sync.drain(), [])
+
+
+class EntrypointStartupSyncTests(TempDirCase):
+    def test_each_entrypoint_run_queues_one_startup_check(self) -> None:
+        manifest = build_manifest(dict(LAUNCHABLE_RAW), dict(COMING_SOON_RAW))
+        runner = FakeGitRunner(on_clone=SyncServiceTests._materialise)
+        cache = RepositoryCache(self.tmp_path, runner=runner)
+        observed = []
+
+        def gallery_factory(_manifest, _settings, states, sync, **kwargs):
+            def ui(state):
+                self.assertTrue(sync.wait_idle())
+                for update in sync.drain():
+                    states[update.game_id] = update
+                observed.append(states["streetfighter"].status)
+                return UiOutcome(UiAction.QUIT, state.view_mode, state.selected_index)
+            return ui
+
+        with (
+            patch.object(entrypoint, "load_manifest", return_value=manifest),
+            patch.object(entrypoint, "RepositoryCache", return_value=cache),
+            patch.object(entrypoint, "load_gallery", return_value=gallery_factory),
+            patch.object(entrypoint, "load_settings", return_value=Settings()) as settings,
+        ):
+            self.assertEqual(entrypoint.main([]), 0)
+            self.assertEqual(entrypoint.main([]), 0)
+            self.assertEqual(entrypoint.main(["--no-sync"]), 0)
+            settings.return_value = Settings(sync_on_start=False)
+            self.assertEqual(entrypoint.main([]), 0)
+
+        self.assertEqual(
+            observed,
+            [GameStatus.READY, GameStatus.READY, GameStatus.CACHED_OFFLINE, GameStatus.CACHED_OFFLINE],
+        )
+        self.assertEqual(runner.verbs().count("clone"), 1)
+        self.assertEqual(runner.verbs().count("fetch"), 1)
 
 
 if __name__ == "__main__":  # pragma: no cover

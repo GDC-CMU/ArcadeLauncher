@@ -49,15 +49,16 @@ def initial_states(manifest: Manifest, *, sync_enabled: bool = True) -> dict[str
 
 
 class SyncService:
-    """A single-worker background synchroniser.
+    """A single-worker startup synchroniser.
 
     Args:
         cache: The repository cache to drive.
         online: When ``False`` the worker only verifies what is already on disk
             and never touches the network.
 
-    The service owns one daemon thread.  :meth:`stop` is idempotent and is
-    safe to call from a signal handler or a ``finally`` block.
+    Each game is checked at most once per service lifetime, including failed
+    checks. Restarting the launcher creates a new service and checks again.
+    The service owns one daemon thread. :meth:`stop` is idempotent.
     """
 
     def __init__(self, cache: RepositoryCache, *, online: bool = True) -> None:
@@ -67,6 +68,8 @@ class SyncService:
         self._results: "queue.Queue[GameState]" = queue.Queue()
         self._thread: threading.Thread | None = None
         self._stopping = threading.Event()
+        self._requested_ids: set[str] = set()
+        self._request_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -110,8 +113,8 @@ class SyncService:
     # ------------------------------------------------------------------
     # Queueing
     # ------------------------------------------------------------------
-    def request(self, entry: GameEntry) -> None:
-        """Queue *entry* for synchronisation.
+    def request(self, entry: GameEntry) -> bool:
+        """Queue *entry* once; return False if it has already been requested.
 
         Raises:
             NotLaunchableError: If *entry* is coming-soon. Disabled games must
@@ -121,8 +124,14 @@ class SyncService:
             raise NotLaunchableError(
                 f"game '{entry.id}' is coming-soon and must never be synchronised"
             )
-        self._results.put(GameState(entry.id, GameStatus.UPDATING, "contacting GitHub"))
-        self._requests.put(entry)
+        with self._request_lock:
+            if entry.id in self._requested_ids:
+                return False
+            self._requested_ids.add(entry.id)
+            detail = "contacting GitHub" if self._online else "checking cache"
+            self._results.put(GameState(entry.id, GameStatus.UPDATING, detail))
+            self._requests.put(entry)
+        return True
 
     def request_all(self, entries: Iterable[GameEntry]) -> int:
         """Queue every *launchable* entry; coming-soon entries are skipped.
@@ -132,8 +141,7 @@ class SyncService:
         """
         queued = 0
         for entry in entries:
-            if entry.launchable:
-                self.request(entry)
+            if entry.launchable and self.request(entry):
                 queued += 1
         return queued
 

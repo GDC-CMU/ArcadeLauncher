@@ -11,7 +11,9 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from launcher.cache import RepositoryCache
@@ -200,6 +202,59 @@ class TwoLevelExitTests(SupervisorHarness):
         _, cwd, game_id = runner.calls[0]
         self.assertEqual(cwd, self.checkout)
         self.assertEqual(game_id, "streetfighter")
+
+
+class CheckoutLifetimeTests(SupervisorHarness):
+    def test_shutdown_cancels_a_launch_waiting_for_the_checkout(self) -> None:
+        runner = RecordingRunner()
+        supervisor = self.supervise(ScriptedUi(), runner)
+        entry = self.manifest.by_id("streetfighter")
+        with ThreadPoolExecutor(max_workers=1) as worker:
+            with self.cache.checkout_guard(entry):
+                future = worker.submit(supervisor._launch, entry.id)
+                supervisor._shutdown.set()
+            self.assertIsNone(future.result(timeout=3))
+        self.assertEqual(runner.calls, [])
+
+    def test_sync_cannot_modify_a_checkout_while_its_child_is_running(self) -> None:
+        attempted = threading.Event()
+        mutation_started = threading.Event()
+        held_during_child = []
+        futures = []
+        cache = self.cache
+        game = self.manifest.by_id("streetfighter")
+
+        class ObservedGitRunner(FakeGitRunner):
+            def run(self, arguments, cwd=None):
+                if arguments[0] == "fetch":
+                    mutation_started.set()
+                return super().run(arguments, cwd)
+
+        cache.runner = ObservedGitRunner()
+
+        def update_checkout():
+            attempted.set()
+            return cache.sync(game)
+
+        with ThreadPoolExecutor(max_workers=1) as worker:
+            class ChildRunner(RecordingRunner):
+                def run(self, command, cwd, *, game_id):
+                    futures.append(worker.submit(update_checkout))
+                    self_started = attempted.wait(3)
+                    held_during_child.append(
+                        self_started and not mutation_started.wait(0.1)
+                    )
+                    return super().run(command, cwd, game_id=game_id)
+
+            ui = ScriptedUi(
+                UiOutcome(UiAction.LAUNCH, ViewMode.GRID, 0, game.id),
+                UiOutcome(UiAction.QUIT, ViewMode.GRID, 0),
+            )
+            self.assertEqual(self.supervise(ui, ChildRunner()).run(), 0)
+            self.assertTrue(futures[0].result(timeout=3).status.is_playable)
+
+        self.assertEqual(held_during_child, [True])
+        self.assertTrue(mutation_started.is_set(), "update must proceed after the child exits")
 
 
 class RefusalTests(SupervisorHarness):

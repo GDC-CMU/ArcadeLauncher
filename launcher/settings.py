@@ -44,8 +44,8 @@ class Settings:
         fullscreen: Whether to open the 800x600 display fullscreen. The arcade
             box wants ``true``; a development machine usually wants ``false``.
         frame_rate: Target frames per second.
-        sync_on_start: Whether to kick off the background repository sync as
-            soon as the gallery appears.
+        sync_on_start: Whether to check each game's remote once at launcher
+            startup. When false, startup only verifies local cached copies.
         nav_initial_delay_ms: Hold time before a held direction starts to
             auto-repeat.
         nav_repeat_ms: Interval between auto-repeats once repeating.
@@ -53,12 +53,9 @@ class Settings:
             The arcade stick is digital, so 0.5 matches the reference
             ``joystick.py`` from the arcade startercode.
         network_timeout_s: Per-git-command timeout for background syncing, in
-            seconds. Kept low deliberately: a disconnected cabinet pays this
-            once per launchable game at start-up and once more before every
-            launch, so a high value turns "no Wi-Fi" into a long visible
-            stall rather than an instant, honest ``CACHED_OFFLINE``. See
-            ``launcher.cache._DEFAULT_GIT_TIMEOUT_S`` for the fair-day
-            reasoning behind the default.
+            seconds. This bounds the startup check before a disconnected
+            cabinet falls back to its cached games. Launching and returning
+            to the gallery do not schedule additional network checks.
         attract_idle_ms: How long the gallery must see *zero* genuine input
             (buttons, keys, or stick movement past ``axis_deadzone``) before
             it drops into attract mode -- see :mod:`launcher.attract`. This

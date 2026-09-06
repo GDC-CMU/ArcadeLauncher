@@ -453,6 +453,13 @@ class Supervisor:
     # ------------------------------------------------------------------
     def _launch(self, game_id: str) -> Notice | None:
         entry = self.manifest.by_id(game_id)
+        with self.cache.checkout_guard(entry):
+            if self._shutdown.is_set():
+                _log.info("shutdown requested; cancelling launch of %s", game_id)
+                return None
+            return self._launch_entry(entry)
+
+    def _launch_entry(self, entry: GameEntry) -> Notice | None:
         readiness = self.cache.verify_only(entry)
         if not readiness.status.is_playable:
             _log.warning("refusing to launch %s: %s", entry.id, readiness.detail)

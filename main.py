@@ -164,6 +164,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         shutdown = threading.Event()
         with SyncService(cache, online=online) as sync:
+            sync.request_all(manifest.launchable)
             session = gallery_session(
                 manifest,
                 settings,

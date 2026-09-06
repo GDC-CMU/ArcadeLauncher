@@ -346,29 +346,22 @@ game that has *never* downloaded successfully on this cabinet shows
 **once**, the first time it is ever added — after that first successful
 clone, it is on disk for good and a dead network cannot take it away.
 
-Game checkouts live in `.arcade-cache/` (git-ignored, never committed). On
-start-up a background thread refreshes each launchable game while the gallery is
-already interactive — updating never blocks browsing. Every refresh actually
-re-fetches: there is no "recently synced, skip it" timestamp, because that is
-exactly what once let a three-commits-stale build run for hours while reading
-`PLAYABLE`. The same refresh runs one more time, forced, the instant a visitor
-presses Play — so even a session left running all day hands out the build
-that exists *right then*, not whatever was current when the gallery opened.
-Both refreshes are backgrounded; neither blocks rendering.
+Game checkouts live in `.arcade-cache/` (git-ignored, never committed). Each
+launcher process checks its launchable games **once at startup**, on a background
+thread while the gallery remains browsable. Missing games are cloned; installed
+games are fetched for changes, not downloaded from scratch.
 
-**Every git call is bounded, deliberately tightly.** A disconnected cabinet
-used to pay a 45-second network timeout *per launchable game* at start-up,
-and once more before every launch — over 20 seconds of that was spent simply
-failing to connect, on every single one of those calls. It now gives up on a
-single git command after `network_timeout_s` seconds (`8` by default — see
-`config/launcher.json`), and the pre-launch refresh a visitor's own Play
-press waits on is bounded separately and much tighter still: a couple of
-seconds, after which it launches the copy already confirmed on disk rather
-than leaving the visitor staring at `UPDATING`. Once a fetch or clone has
-actually timed out, the launcher also stops re-paying that timeout for a
-while — only the first attempt against a genuinely dead network is
-expensive; every game after it fails fast for about a minute before trying
-again, in case the Wi-Fi comes back mid-fair.
+**Playing again does not contact GitHub.** Launching a game and returning to the
+gallery reuse the checked local copies. Duplicate sync requests are ignored,
+including after a failed check. To pick up a newly published build or retry after
+Wi-Fi returns, exit and restart the launcher. There is no multi-hour freshness
+timer and no new maintenance control: a new process starts a new check.
+
+**Network waits stay bounded.** Each git command has a `network_timeout_s` limit
+(`8` seconds by default; see `config/launcher.json`). After a network timeout,
+subsequent startup checks fail fast during the runner's short retry cooldown,
+letting installed games fall back to `CACHED OFFLINE`. There is no additional
+pre-launch network wait once a game's startup check has finished.
 
 Each card reports exactly what is true of it right now, including the short
 commit id of the build it is showing — the answer to "am I running the
@@ -376,8 +369,8 @@ latest?" without needing a terminal:
 
 | Badge | Meaning |
 | --- | --- |
-| `PLAYABLE` | Cached, verified and current. Press `A` to start it. Its detail line reads `updated <commit>`. |
-| `UPDATING` | A background fetch is running. Play is held for the second or two it takes, because git may be mid-write in that checkout. |
+| `PLAYABLE` | Cached and verified by this process's startup check. Press `A` to start it. Its detail line identifies the installed commit. |
+| `UPDATING` | The startup check is pending or running. Wait for it to finish before launching this game; browsing remains available. |
 | `CACHED OFFLINE` | The update failed, but a good checkout is already there. Fully playable, and its detail line still names the cached commit. |
 | `UNAVAILABLE` | Never successfully downloaded on this cabinet. Not playable. |
 | `COMING SOON` | Curated in the manifest but not released yet. Not playable. |
@@ -391,17 +384,16 @@ The rules that follow from this:
 
 - **A failed update never removes a working game.** A fetch that fails downgrades
   the badge to `OFFLINE` and leaves the checkout alone.
-- **A launch never waits on the network for a game already on disk.** The
-  pre-launch refresh above is bounded; if it has not answered in time, the
-  cached copy starts anyway. See "Every git call is bounded" above.
+- **A ready game launches locally.** No new fetch is requested on Play or on
+  gallery return. A checkout guard prevents an update from modifying files
+  while that game's child process is running.
 - **Coming-soon entries never touch the network.** They structurally carry no
   repository, ref or entrypoint, so there is nothing to clone.
 - **Nothing outside the cache is ever executed.** Every entrypoint is resolved
   against its own checkout directory and rejected if it escapes — `..`, absolute
   paths and symlink tricks all fail validation before a process is spawned.
-- **`--no-sync` is a hard promise.** In offline mode `git` is not invoked at all,
-  including for the pre-launch refresh — it falls back to verifying whatever is
-  already on disk, same as every other offline check.
+- **`--no-sync` is a hard promise.** In offline mode `git` is not invoked at all:
+  startup and pre-launch readiness checks verify only what is already on disk.
 
 ## Screenshots
 

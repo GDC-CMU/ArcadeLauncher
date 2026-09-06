@@ -20,10 +20,12 @@ import json
 import logging
 import os
 import subprocess
+import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Protocol, Sequence
+from typing import Callable, Iterator, Protocol, Sequence
 
 from .errors import GitUnavailableError, NotLaunchableError
 from .manifest import GameEntry
@@ -41,30 +43,17 @@ _log = logging.getLogger(__name__)
 
 #: Default per-git-command network timeout, in seconds.
 #:
-#: A club fair's Wi-Fi, when it exists at all, either connects in well under a
-#: second or is not there -- there is no realistic "slow but working" middle
-#: ground worth waiting through. This runs once per launchable game at
-#: start-up (:meth:`~launcher.sync.SyncService.request_all`) *and* once more,
-#: immediately, before every launch, so a high timeout does not just delay
-#: one card's badge: with no network it multiplies by the whole catalogue and
-#: then again by every visitor who presses Play. A previous value of 45s
-#: measured at 21s to *fail* against an unreachable host on this cabinet's
-#: network stack -- per game, every time. Low enough that a genuinely healthy
-#: connection is never at risk of being cut off (git clone/fetch calls here
-#: are shallow and small), high enough that an ordinarily slow-but-working
-#: club Wi-Fi still gets to finish.
+#: Bounds the startup check so a disconnected cabinet reaches its cached
+#: games without waiting for the operating system's full connection timeout.
 _DEFAULT_GIT_TIMEOUT_S = 8
 
 #: How long a runner remembers "the network looked unreachable" after a
 #: fetch or clone actually times out, before it is willing to pay the full
 #: timeout again. Without this, a disconnected cabinet re-discovers the same
-#: dead network once per launchable game at start-up and once more before
-#: every launch -- each one paying the full timeout in serial on the sync
-#: worker. With it, only the first attempt in a session is expensive; every
-#: other network-touching call for the rest of the cooldown fails instantly.
-#: Long enough to actually save something; short enough that a Wi-Fi that
-#: comes back mid-fair is noticed within a minute, not ignored for the rest
-#: of the day.
+#: dead network once per launchable game at start-up, each paying the full
+#: timeout in serial on the sync worker. After the first timeout, further
+#: network-touching calls fail instantly for the rest of the cooldown.
+#: This does not schedule retries: restart the launcher to check again.
 _NETWORK_RETRY_COOLDOWN_S = 60.0
 
 #: Git subcommands that actually touch the network -- only these are subject
@@ -277,6 +266,24 @@ class RepositoryCache:
         self.root = Path(root) if root is not None else default_cache_root()
         self.runner: GitRunner = runner if runner is not None else SubprocessGitRunner()
         self._clock = clock
+        self._checkout_locks: dict[str, threading.RLock] = {}
+        self._locks_guard = threading.Lock()
+
+    @contextmanager
+    def checkout_guard(self, entry: GameEntry) -> Iterator[None]:
+        """Keep an update and a running child from using one checkout together.
+
+        The supervisor holds this guard for the child's entire lifetime.
+        Locks are local to this cache instance, shared with the sync worker.
+        """
+        self._guard_launchable(entry)
+        with self._locks_guard:
+            lock = self._checkout_locks.get(entry.id)
+            if lock is None:
+                lock = threading.RLock()
+                self._checkout_locks[entry.id] = lock
+        with lock:
+            yield
 
     # ------------------------------------------------------------------
     # Locations
@@ -394,25 +401,11 @@ class RepositoryCache:
     def sync(self, entry: GameEntry) -> GameState:
         """Clone or refresh *entry* and report the resulting state.
 
-        Every call that finds a checkout already on disk re-fetches it: there
-        is no timestamp that decides a build is "fresh enough" to skip the
-        network. *When* to call this is the caller's decision, not this
-        method's -- :class:`~launcher.sync.SyncService` already makes it once
-        per gallery session (via ``request_all``) and once more, immediately,
-        right before a launch is allowed to proceed, both off the render
-        thread. A single shallow ``fetch`` against a checkout that already
-        exists is small and fast, and it runs in the background regardless, so
-        there is nothing here worth trading away.
-
-        A previous revision skipped the fetch for six hours after the last
-        successful sync, on the theory that it kept a restart at a club fair
-        instant. That shaved a cost no visitor could perceive (syncing was
-        already backgrounded) against serving a build that was quietly hours
-        stale, with the gallery reporting it as "up to date" the whole time --
-        a strictly worse trade. The one place that still deliberately avoids
-        the network is offline operation: ``SyncService(online=False)`` (wired
-        up from ``sync_on_start`` / ``--no-sync``) calls :meth:`verify_only`
-        instead of this method and never invokes git at all.
+        An explicit call always checks the remote; freshness is not inferred
+        from a timestamp. :class:`~launcher.sync.SyncService` calls this once
+        per game at launcher startup, not on gallery re-entry or game launch.
+        Offline operation calls :meth:`verify_only` instead, with no git work.
+        The checkout guard serializes mutation with a running child.
 
         Never raises for expected failures -- offline, bad ref, missing git and
         a missing entrypoint all become a :class:`~launcher.status.GameState`
@@ -422,7 +415,10 @@ class RepositoryCache:
             NotLaunchableError: If *entry* is coming-soon. This is a programming
                 error, not a runtime condition, and is deliberately loud.
         """
-        self._guard_launchable(entry)
+        with self.checkout_guard(entry):
+            return self._sync(entry)
+
+    def _sync(self, entry: GameEntry) -> GameState:
         assert entry.repository and entry.ref  # narrowed by _guard_launchable
 
         if not self.runner.available():

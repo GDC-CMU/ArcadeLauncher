@@ -75,16 +75,6 @@ _VIEW_COMMANDS: dict[Command, ViewMode] = {
 
 _TOAST_MS = 1600
 
-#: Bound on how long a launch waits for its own pre-flight refresh (see
-#: :meth:`GallerySession._settle_launch`) before giving up and starting the
-#: copy already confirmed playable on disk. On a disconnected cabinet the
-#: alternative is a visitor watching "STILL SYNCING" for however long the
-#: network stack takes to give up -- at a club fair that reads as a frozen
-#: machine, not a loading game. A couple of seconds is enough for a healthy
-#: network to report a fresher commit but short enough that a slow or absent
-#: one never costs a visitor their Play press.
-_LAUNCH_REFRESH_TIMEOUT_MS = 2000
-
 #: How long a session waits, after it opens, before trusting a
 #: ``pygame.key.get_pressed()``/``Joystick.get_button()`` reading of "not
 #: held" enough to arm an exit source on it -- see the docstring on
@@ -118,8 +108,8 @@ class GallerySession:
         settings: Resolved configuration (view mode, frame rate, timings).
         states: Live availability per game id. Mutated in place by
             :meth:`_absorb_sync` as background syncs finish.
-        sync: Optional background sync service. ``None`` disables updates,
-            which is what the offline tests use.
+        sync: Optional startup sync service to drain. Its initial batch is
+            queued by the entrypoint, not by each reopened gallery.
         should_stop: Polled once per frame; when it returns ``True`` the
             session ends as though the visitor had exited. This is how a
             SIGTERM reaches the loop. Without it the supervisor's shutdown
@@ -493,19 +483,11 @@ class GallerySession:
         grid_scroll = grid_target_scroll(index, len(self.manifest))
         focus_ms = 0
         elapsed_ms = 0
-        #: ``(game_id, index, deadline_ms)`` while a launch is waiting on its
-        #: own immediately-before-launch refresh; see the LAUNCH handling
-        #: below and :meth:`_settle_launch`. ``deadline_ms`` bounds that wait
-        #: against ``elapsed_ms`` -- see :data:`_LAUNCH_REFRESH_TIMEOUT_MS`.
-        pending_launch: tuple[str, int, int] | None = None
         #: The selection and view mode a visitor actually left the gallery
         #: on, captured the instant attract mode triggers and restored the
         #: instant any input cancels it -- ``None`` whenever attract is not
         #: (and was not, this frame) running. See the attract handling below.
         attract_saved: tuple[int, ViewMode] | None = None
-
-        if self.sync is not None and self.settings.sync_on_start:
-            self.sync.request_all(self.manifest.launchable)
 
         while True:
             # Checked first, and every frame: a termination request must be
@@ -520,14 +502,6 @@ class GallerySession:
             focus_ms += delta_ms
             self._absorb_sync()
             self._sync_exit_arming(elapsed_ms)
-
-            if pending_launch is not None:
-                outcome, refusal = self._settle_launch(pending_launch, mode, elapsed_ms)
-                if outcome is not None:
-                    return outcome
-                if refusal is not None:
-                    pending_launch = None
-                    toast = refusal
 
             # Attract mode: advance the idle timer, or -- once triggered --
             # the demo's own state machine. It only ever proposes a view mode
@@ -637,22 +611,7 @@ class GallerySession:
                     entry = self.manifest[index]
                     status = self._status(entry.id)
                     if entry.launchable and status.is_playable:
-                        if self.sync is not None:
-                            # Even a card that already reads READY may be
-                            # hours stale in a long-running session: confirm
-                            # it is current before the visitor's press
-                            # actually starts anything. This runs on the
-                            # background worker (see cache.sync), so the
-                            # gallery keeps rendering while it happens; the
-                            # card's own badge flips to UPDATING to show it.
-                            pending_launch = (
-                                entry.id,
-                                index,
-                                elapsed_ms + _LAUNCH_REFRESH_TIMEOUT_MS,
-                            )
-                            self.sync.request(entry)
-                        else:
-                            return self._outcome(UiAction.LAUNCH, mode, index, entry.id)
+                        return self._outcome(UiAction.LAUNCH, mode, index, entry.id)
                     else:
                         toast = self._refusal(entry, status, elapsed_ms)
                     notice = None
@@ -825,41 +784,6 @@ class GallerySession:
             headline, detail = "NOT AVAILABLE", f"{entry.title} could not be downloaded"
         _log.info("refused to launch %s (%s)", entry.id, status.value)
         return Toast(headline, detail, started_ms=now_ms, duration_ms=_TOAST_MS)
-
-    def _settle_launch(
-        self, pending: tuple[str, int, int], mode: ViewMode, now_ms: int
-    ) -> tuple[UiOutcome | None, Toast | None]:
-        """Resolve a launch that is waiting on its own pre-flight refresh.
-
-        Returns ``(outcome, None)`` once the refresh landed on something
-        playable -- or once ``deadline_ms`` passes while the worker is still
-        on it, in which case this launches the copy already on disk rather
-        than making a visitor wait on the network (see
-        :data:`_LAUNCH_REFRESH_TIMEOUT_MS`; a card only ever reaches this
-        method already confirmed playable, see the LAUNCH handling in
-        :meth:`_loop`). Returns ``(None, toast)`` once the refresh lands on
-        something that is not playable, or ``(None, None)`` while the
-        background worker is still on it and the deadline has not passed --
-        in which case the caller keeps waiting and the card's own
-        ``UPDATING`` badge (set by
-        :meth:`~launcher.sync.SyncService.request`) is the only visible sign
-        anything is happening.
-        """
-        game_id, index, deadline_ms = pending
-        current = self.states.get(game_id)
-        if current is not None and not current.status.is_busy:
-            if current.status.is_playable:
-                return self._outcome(UiAction.LAUNCH, mode, index, game_id), None
-            entry = self.manifest.by_id(game_id)
-            return None, self._refusal(entry, current.status, now_ms)
-        if now_ms >= deadline_ms:
-            _log.info(
-                "pre-launch refresh for %s did not settle in time; launching "
-                "the cached copy instead of making the visitor wait",
-                game_id,
-            )
-            return self._outcome(UiAction.LAUNCH, mode, index, game_id), None
-        return None, None
 
     def _absorb_sync(self) -> None:
         """Fold any finished background sync results into the live state map."""

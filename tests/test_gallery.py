@@ -405,52 +405,19 @@ class LoopTests(unittest.TestCase):
 
 
 class ScriptedSync:
-    """A test double standing in for :class:`~launcher.sync.SyncService`.
+    """Publish startup results; fail if a gallery tries to enqueue more work."""
 
-    Real :class:`SyncService` runs git on a background thread, which would
-    make the pre-launch-refresh tests below racy against wall-clock time.
-    This double keeps the same two-method surface the gallery actually uses
-    (``request``/``drain``) but publishes a scripted result the very next
-    time :meth:`drain` is called, so the test controls exactly how many
-    frames the "refresh" takes without touching a thread or the filesystem.
-    """
+    def __init__(self, *batches: list[GameState]) -> None:
+        self._batches = list(batches)
 
-    def __init__(self, results: dict[str, GameState]) -> None:
-        self._results = results
-        self.requested: list[str] = []
-        self._queued: list[GameState] = []
+    def request_all(self, entries) -> int:
+        raise AssertionError("the entrypoint, not the gallery, owns startup sync")
 
-    def request_all(self, entries) -> int:  # pragma: no cover - unused here
-        return len(list(entries))
-
-    def request(self, entry) -> None:
-        self.requested.append(entry.id)
-        self._queued.append(self._results[entry.id])
+    def request(self, entry) -> bool:
+        raise AssertionError("launching must not request another update")
 
     def drain(self) -> list[GameState]:
-        published, self._queued = self._queued, []
-        return published
-
-
-class NeverSettlingSync:
-    """A sync double that never resolves a request -- stands in for a
-    background worker stuck retrying a dead or absent network. Exercises
-    the bound on the pre-launch refresh (item 2 of the offline-speed fix):
-    the gallery must not wait on this forever, only up to
-    ``_LAUNCH_REFRESH_TIMEOUT_MS``.
-    """
-
-    def __init__(self) -> None:
-        self.requested: list[str] = []
-
-    def request_all(self, entries) -> int:  # pragma: no cover - unused here
-        return len(list(entries))
-
-    def request(self, entry) -> None:
-        self.requested.append(entry.id)
-
-    def drain(self) -> list[GameState]:
-        return []
+        return self._batches.pop(0) if self._batches else []
 
 
 def _states_for(status_for_launchable: GameStatus) -> dict[str, GameState]:
@@ -464,103 +431,93 @@ def _states_for(status_for_launchable: GameStatus) -> dict[str, GameState]:
     }
 
 
-class PreLaunchRefreshTests(unittest.TestCase):
-    """A launch re-syncs its game immediately before starting it (item 3):
-    even a card that already reads READY may be stale in a long session, so
-    pressing Play confirms the checkout is current -- via the background
-    worker, never a blocking call on this thread -- before the outcome is
-    handed back to the supervisor.
-    """
+class CachedLaunchTests(unittest.TestCase):
+    """Startup results are consumed without re-fetching on launch or return."""
 
-    def run_session(self, sync, script):
-        settings = Settings(fullscreen=False, frame_rate=60, sync_on_start=False)
-        states = _states_for(GameStatus.READY)
+    def run_session(self, sync, script, status=GameStatus.READY):
+        settings = Settings(fullscreen=False, frame_rate=60, sync_on_start=True)
+        states = _states_for(status)
         game = ScriptedSession(MANIFEST, settings, states, sync, script=script)
         outcome = game(SessionState())
         self.addCleanup(pygame.quit)
-        return states, outcome
+        return game, outcome
 
-    def test_launch_waits_for_its_own_refresh_and_uses_the_new_commit(self) -> None:
+    def test_ready_game_launches_on_the_first_frame_without_refresh(self) -> None:
         game_id = MANIFEST[0].id
-        sync = ScriptedSync(
-            {game_id: GameState(game_id, GameStatus.READY, "updated def5678")}
+        game, outcome = self.run_session(
+            ScriptedSync(), script=[[button_event(BUTTON_LAUNCH)]]
         )
-        states, outcome = self.run_session(
-            sync, script=[[button_event(BUTTON_LAUNCH)], []]
-        )
-        self.assertEqual(sync.requested, [game_id], "the selected game must be re-synced")
         self.assertIs(outcome.action, UiAction.LAUNCH)
         self.assertEqual(outcome.game_id, game_id)
-        self.assertIn("def5678", states[game_id].detail)
+        self.assertEqual(game.frames, 1)
 
-    def test_launch_still_starts_the_cached_copy_if_the_refresh_fails(self) -> None:
-        """A failed pre-launch fetch must not strand the visitor: a good
-        checkout still launches and still reports CACHED_OFFLINE, exactly as
-        it would if the failure had happened during the background sync."""
+    def test_gallery_can_reopen_and_launch_again_without_queueing_updates(self) -> None:
+        game, outcome = self.run_session(
+            ScriptedSync(), script=[[button_event(BUTTON_LAUNCH)]]
+        )
+        for _ in range(3):
+            game._script = [[button_event(BUTTON_LAUNCH)]]
+            outcome = game(
+                SessionState(selected_index=outcome.selected_index, view_mode=outcome.view_mode)
+            )
+            self.assertIs(outcome.action, UiAction.LAUNCH)
+        self.assertEqual(game.frames, 4)
+
+    def test_failed_startup_check_still_launches_the_cached_copy(self) -> None:
         game_id = MANIFEST[0].id
         sync = ScriptedSync(
-            {
-                game_id: GameState(
+            [
+                GameState(
                     game_id, GameStatus.CACHED_OFFLINE, "network unreachable (cached abc1234)"
                 )
-            }
+            ]
         )
-        states, outcome = self.run_session(
-            sync, script=[[button_event(BUTTON_LAUNCH)], []]
+        game, outcome = self.run_session(
+            sync, script=[[button_event(BUTTON_LAUNCH)]], status=GameStatus.UPDATING
         )
         self.assertIs(outcome.action, UiAction.LAUNCH)
         self.assertEqual(outcome.game_id, game_id)
-        self.assertIs(states[game_id].status, GameStatus.CACHED_OFFLINE)
+        self.assertIs(game.states[game_id].status, GameStatus.CACHED_OFFLINE)
 
-    def test_launch_is_refused_if_the_refresh_leaves_nothing_playable(self) -> None:
-        """If the checkout is gone by the time the refresh runs, the visitor
-        stays in the gallery instead of being handed a broken launch."""
+    def test_launch_uses_the_existing_startup_jobs_result(self) -> None:
         game_id = MANIFEST[0].id
         sync = ScriptedSync(
-            {game_id: GameState(game_id, GameStatus.UNAVAILABLE, "checkout corrupted")}
+            [GameState(game_id, GameStatus.UPDATING, "contacting GitHub")],
+            [GameState(game_id, GameStatus.READY, "updated def5678")],
+        )
+        game, outcome = self.run_session(
+            sync,
+            script=[
+                [button_event(BUTTON_LAUNCH)],
+                [button_up_event(BUTTON_LAUNCH)],
+                [button_event(BUTTON_LAUNCH)],
+            ],
+        )
+        self.assertIs(outcome.action, UiAction.LAUNCH)
+        self.assertEqual(game.frames, 3, "must not launch while the update is still active")
+        self.assertIn("def5678", game.states[game_id].detail)
+
+    def test_unavailable_startup_result_is_not_launched(self) -> None:
+        game_id = MANIFEST[0].id
+        sync = ScriptedSync(
+            [GameState(game_id, GameStatus.UNAVAILABLE, "no cached copy")]
         )
         _, outcome = self.run_session(
             sync,
-            script=[[button_event(BUTTON_LAUNCH)], [], [key_event(pygame.K_ESCAPE)]],
+            script=[[button_event(BUTTON_LAUNCH)]]
+            + [[] for _ in range(GRACE_FRAMES)]
+            + [[key_event(pygame.K_ESCAPE)]],
         )
         self.assertIs(outcome.action, UiAction.QUIT)
 
-    def test_launch_proceeds_once_the_refresh_bound_elapses_instead_of_hanging(
-        self,
-    ) -> None:
-        """Item 2 of the offline-speed fix: a launch must never wait the
-        full network timeout for its own pre-flight refresh. The card was
-        already confirmed playable the instant Play was pressed, so once the
-        bound (:data:`~launcher.gallery._LAUNCH_REFRESH_TIMEOUT_MS`) elapses
-        without an answer, the visitor must be handed the cached copy rather
-        than stand at a cabinet that looks frozen behind an ``UPDATING``
-        badge."""
-        game_id = MANIFEST[0].id
-        sync = NeverSettlingSync()
-        # 2000ms bound / 16ms-per-frame = 125 frames; this script is much
-        # longer so a regression (no bound at all) would run out the clock
-        # and fall through to the safety net's Escape instead of launching.
-        script = [[button_event(BUTTON_LAUNCH)]] + [[] for _ in range(400)]
-        _, outcome = self.run_session(sync, script=script)
-        self.assertIs(outcome.action, UiAction.LAUNCH)
-        self.assertEqual(outcome.game_id, game_id)
-        self.assertEqual(sync.requested, [game_id])
-
-    def test_offline_mode_still_confirms_without_any_network_call(self) -> None:
-        """Offline mode (``sync_on_start`` off / ``--no-sync``) re-verifies the
-        disk before launch through the same path, but the double standing in
-        for it here never talks to git either way -- what matters is that the
-        gallery still routes the confirmation through the worker rather than
-        skipping it."""
-        game_id = MANIFEST[0].id
-        sync = ScriptedSync(
-            {game_id: GameState(game_id, GameStatus.CACHED_OFFLINE, "using cached copy abc1234")}
-        )
-        states, outcome = self.run_session(
-            sync, script=[[button_event(BUTTON_LAUNCH)], []]
+    def test_cached_offline_game_needs_no_service_result_to_launch(self) -> None:
+        game, outcome = self.run_session(
+            ScriptedSync(),
+            script=[[button_event(BUTTON_LAUNCH)]],
+            status=GameStatus.CACHED_OFFLINE,
         )
         self.assertIs(outcome.action, UiAction.LAUNCH)
-        self.assertIs(states[game_id].status, GameStatus.CACHED_OFFLINE)
+        self.assertEqual(game.frames, 1)
 
 
 class ExitArmingTests(unittest.TestCase):

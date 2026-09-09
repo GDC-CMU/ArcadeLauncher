@@ -19,6 +19,7 @@ from pathlib import Path
 from launcher.cache import RepositoryCache
 from launcher.errors import LaunchError, NotLaunchableError, UiFatalError
 from launcher.manifest import Runtime
+from launcher.preparation import PreparationService
 from launcher.supervisor import (
     ChildResult,
     ProcessGameRunner,
@@ -39,6 +40,7 @@ from support import (
     child_fixture,
     entry,
 )
+from runtime_support import runtime_fixture, write_pack
 
 
 class ScriptedUi:
@@ -63,7 +65,7 @@ class RecordingRunner:
         self.calls: list[tuple[list[str], Path, str]] = []
         self.terminated = 0
 
-    def run(self, command, cwd, *, game_id):  # noqa: ANN001 - protocol shape
+    def run(self, command, cwd, *, game_id, env=None):  # noqa: ANN001 - protocol shape
         self.calls.append((list(command), Path(cwd), game_id))
         return self.result
 
@@ -77,7 +79,12 @@ class SupervisorHarness(TempDirCase):
     def setUp(self) -> None:
         super().setUp()
         self.manifest = build_manifest(dict(LAUNCHABLE_RAW), dict(COMING_SOON_RAW))
-        self.cache = RepositoryCache(self.tmp_path / "cache", runner=FakeGitRunner())
+        self.cache = RepositoryCache(
+            self.tmp_path / "cache", runner=FakeGitRunner(),
+            preparation=PreparationService(
+                self.tmp_path / "cache" / "prepared", data_root=self.tmp_path / "userdata",
+            ),
+        )
         self.checkout = self.cache.checkout_path(self.manifest.by_id("streetfighter"))
         (self.checkout / ".git").mkdir(parents=True)
         (self.checkout / "main.py").write_text("print('hi')\n", encoding="utf-8")
@@ -238,13 +245,13 @@ class CheckoutLifetimeTests(SupervisorHarness):
 
         with ThreadPoolExecutor(max_workers=1) as worker:
             class ChildRunner(RecordingRunner):
-                def run(self, command, cwd, *, game_id):
+                def run(self, command, cwd, *, game_id, env=None):
                     futures.append(worker.submit(update_checkout))
                     self_started = attempted.wait(3)
                     held_during_child.append(
                         self_started and not mutation_started.wait(0.1)
                     )
-                    return super().run(command, cwd, game_id=game_id)
+                    return super().run(command, cwd, game_id=game_id, env=env)
 
             ui = ScriptedUi(
                 UiOutcome(UiAction.LAUNCH, ViewMode.GRID, 0, game.id),
@@ -255,6 +262,82 @@ class CheckoutLifetimeTests(SupervisorHarness):
 
         self.assertEqual(held_during_child, [True])
         self.assertTrue(mutation_started.is_set(), "update must proceed after the child exits")
+
+
+class NativeSupervisorTests(TempDirCase):
+    def setUp(self):
+        super().setUp()
+        raw = dict(
+            LAUNCHABLE_RAW, id="flappy-scotty", runtime="godot",
+            godot_version="4.4.1-stable", entrypoint="Flappy Scotty.pck",
+        )
+        self.manifest = build_manifest(raw, dict(LAUNCHABLE_RAW))
+        self.store, self.prep_runner, _ = runtime_fixture(self, self.tmp_path / "runtimes")
+        self.preparation = PreparationService(
+            self.tmp_path / "cache" / "prepared", runtimes=self.store, runner=self.prep_runner,
+            data_root=self.tmp_path / "userdata",
+        )
+        self.cache = RepositoryCache(
+            self.tmp_path / "cache", runner=FakeGitRunner(), preparation=self.preparation,
+        )
+        game = self.manifest[0]
+        checkout = self.cache.checkout_path(game)
+        (checkout / ".git").mkdir(parents=True)
+        write_pack(checkout / game.entrypoint)
+        self.ready = self.preparation.prepare(game, checkout)
+
+    def test_native_play_and_gallery_return_do_not_prepare_or_fetch(self):
+        from unittest import mock
+
+        class EnvRunner(RecordingRunner):
+            def __init__(self):
+                super().__init__()
+                self.environments = []
+
+            def run(self, command, cwd, *, game_id, env=None):
+                self.environments.append(dict(env))
+                return super().run(command, cwd, game_id=game_id, env=env)
+
+        runner = EnvRunner()
+        ui = ScriptedUi(
+            UiOutcome(UiAction.LAUNCH, ViewMode.GRID, 0, "flappy-scotty"),
+            UiOutcome(UiAction.LAUNCH, ViewMode.GRID, 0, "flappy-scotty"),
+            UiOutcome(UiAction.QUIT, ViewMode.GRID, 0),
+        )
+        with (
+            mock.patch.object(self.preparation, "prepare", side_effect=AssertionError("prepare on Play")),
+            mock.patch.object(self.store, "ensure", side_effect=AssertionError("provision on Play")),
+            mock.patch.object(self.cache.runner, "run", side_effect=AssertionError("git on Play")),
+            mock.patch.object(self.prep_runner, "run", side_effect=AssertionError("import/probe on Play")),
+        ):
+            supervisor = Supervisor(self.manifest, self.cache, ui, runner=runner, install_signal_handlers=False)
+            self.assertEqual(supervisor.run(), 0)
+        self.assertEqual(len(runner.calls), 2)
+        for command, cwd, _ in runner.calls:
+            self.assertEqual(command[0], str(self.ready.executable))
+            self.assertEqual(cwd, self.ready.checkout)
+            self.assertEqual(command[command.index("--main-pack") + 1], str(cwd / "Flappy Scotty.pck"))
+        for env in runner.environments:
+            self.assertEqual(env["ARCADE_MODE"], "1")
+            self.assertEqual(env["ARCADE_GAME_DATA_DIR"], str(self.ready.data_dir))
+
+    def test_a_missing_native_runtime_does_not_disable_legacy_python(self):
+        self.ready.executable.unlink()
+        legacy = self.cache.checkout_path(self.manifest[1])
+        (legacy / ".git").mkdir(parents=True)
+        (legacy / "main.py").write_text("print('legacy')\n", encoding="utf-8")
+        runner = RecordingRunner()
+        ui = ScriptedUi(
+            UiOutcome(UiAction.LAUNCH, ViewMode.GRID, 0, "flappy-scotty"),
+            UiOutcome(UiAction.LAUNCH, ViewMode.GRID, 1, "streetfighter"),
+            UiOutcome(UiAction.QUIT, ViewMode.GRID, 1),
+        )
+        supervisor = Supervisor(self.manifest, self.cache, ui, runner=runner, install_signal_handlers=False)
+        self.assertEqual(supervisor.run(), 0)
+        self.assertTrue(ui.states[1].notice.is_error)
+        self.assertEqual(len(runner.calls), 1)
+        self.assertEqual(runner.calls[0][0], [sys.executable, "main.py"])
+        self.assertEqual(runner.calls[0][2], "streetfighter")
 
 
 class RefusalTests(SupervisorHarness):
@@ -409,7 +492,7 @@ class RaisingRunner:
         self._exc = exc
         self.terminated = 0
 
-    def run(self, command, cwd, *, game_id):  # noqa: ANN001 - protocol shape
+    def run(self, command, cwd, *, game_id, env=None):  # noqa: ANN001 - protocol shape
         raise self._exc
 
     def terminate(self) -> None:

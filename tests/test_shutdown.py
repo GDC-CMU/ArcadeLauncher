@@ -192,7 +192,7 @@ class TerminationRecordingRunner:
     def __init__(self) -> None:
         self.terminated = 0
 
-    def run(self, command, cwd, *, game_id):  # noqa: ANN001 - protocol shape
+    def run(self, command, cwd, *, game_id, env=None):  # noqa: ANN001 - protocol shape
         raise AssertionError("no launch is expected in these tests")
 
     def terminate(self) -> None:

@@ -150,6 +150,12 @@ class FakeGitRunner:
         """Just the git subcommands seen so far, for readable assertions."""
         return [call[0] for call in self.calls if call]
 
+    def cancel(self) -> None:
+        """No subprocess exists in this fake."""
+
+    def reset_cancel(self) -> None:
+        """No subprocess exists in this fake."""
+
 
 def git_available() -> bool:
     """Whether a usable git binary exists on this machine."""

@@ -33,6 +33,7 @@ __all__ = [
     "SUPPORTED_MANIFEST_VERSION",
     "SUPPORTED_MOTIFS",
     "Runtime",
+    "GodotVersion",
     "CardArt",
     "GameEntry",
     "Manifest",
@@ -75,13 +76,13 @@ _VALIDATION_ROOT: Path = REPO_ROOT / ".__manifest_validation__"
 class Runtime(Enum):
     """Execution model for a manifest entry.
 
-    Only ``python`` is supported today: the launcher starts the entrypoint with
-    :data:`sys.executable`.  Adding a runtime means teaching
-    :mod:`launcher.supervisor` how to build its argument list, so unknown values
-    are rejected loudly rather than assumed.
+    Native engines and isolated Python environments must be prepared before a
+    launch. Existing Python entries without requirements retain their current
+    interpreter. Unknown runtimes are never guessed.
     """
 
     PYTHON = "python"
+    GODOT = "godot"
 
     @classmethod
     def parse(cls, raw: Any, *, game_id: str) -> "Runtime":
@@ -98,6 +99,25 @@ class Runtime(Enum):
                 f"game '{game_id}': unsupported runtime '{raw}' "
                 f"(supported: {supported})"
             ) from None
+
+
+class GodotVersion(Enum):
+    """Exact standard-engine releases with official SHA512 pins in runtimes.py."""
+
+    V4_4_1 = "4.4.1-stable"
+    V4_5_2 = "4.5.2-stable"
+
+    @classmethod
+    def parse(cls, raw: Any, *, game_id: str) -> "GodotVersion":
+        if isinstance(raw, str):
+            try:
+                return cls(raw)
+            except ValueError:
+                pass
+        raise ManifestSchemaError(
+            f"game '{game_id}': godot_version must be an exact pinned release "
+            f"({', '.join(version.value for version in cls)})"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,6 +201,11 @@ def safe_relative_path(raw: str, base: Path, *, game_id: str, field_name: str) -
             f"game '{game_id}': {field_name} must be a non-empty relative path"
         )
     candidate = raw.strip()
+    if candidate != raw or any(ord(char) < 32 for char in candidate):
+        raise UnsafeEntrypointError(
+            f"game '{game_id}': {field_name} contains control characters or "
+            "surrounding whitespace"
+        )
 
     if PurePosixPath(candidate).is_absolute() or PureWindowsPath(candidate).is_absolute():
         raise UnsafeEntrypointError(
@@ -199,6 +224,15 @@ def safe_relative_path(raw: str, base: Path, *, game_id: str, field_name: str) -
         )
 
     parts = PurePosixPath(candidate).parts
+    if any(
+        any(char in '<>:"|?*' for char in part)
+        or part.endswith((".", " "))
+        or PureWindowsPath(part).is_reserved()
+        for part in parts
+    ):
+        raise UnsafeEntrypointError(
+            f"game '{game_id}': {field_name} is not a portable file path"
+        )
     if any(part == ".." for part in parts):
         raise UnsafeEntrypointError(
             f"game '{game_id}': {field_name} '{candidate}' escapes the checkout "
@@ -224,19 +258,32 @@ def _validate_repository(raw: Any, *, game_id: str) -> str:
             f"game '{game_id}': repository must be a non-empty string"
         )
     url = raw.strip()
-    split = urlsplit(url)
+    if any(char.isspace() or ord(char) < 32 for char in url):
+        raise InvalidRepositoryUrlError(f"game '{game_id}': repository contains whitespace/control characters")
+    try:
+        split = urlsplit(url)
+        hostname = split.hostname
+        split.port  # Validate malformed/out-of-range ports too.
+    except ValueError:
+        # urllib errors can repeat the raw netloc, including credentials.
+        raise InvalidRepositoryUrlError(f"game '{game_id}': repository has an invalid host or port") from None
+    if split.username is not None or split.password is not None or split.query or split.fragment:
+        raise InvalidRepositoryUrlError(
+            f"game '{game_id}': repository must not contain credentials, a query, "
+            "or a fragment"
+        )
     if split.scheme != "https":
         raise InvalidRepositoryUrlError(
-            f"game '{game_id}': repository '{url}' must use https:// "
+            f"game '{game_id}': repository must use https:// "
             f"(got '{split.scheme or 'no scheme'}')"
         )
-    if not split.netloc:
+    if not hostname:
         raise InvalidRepositoryUrlError(
-            f"game '{game_id}': repository '{url}' has no host"
+            f"game '{game_id}': repository has no host"
         )
     if not split.path.strip("/"):
         raise InvalidRepositoryUrlError(
-            f"game '{game_id}': repository '{url}' has no repository path"
+            f"game '{game_id}': repository has no repository path"
         )
     return url
 
@@ -307,6 +354,9 @@ class GameEntry:
     ref: str | None = None
     entrypoint: str | None = None
     note: str = ""
+    godot_version: GodotVersion | None = None
+    startup_script: str | None = None
+    python_requirements: str | None = None
 
     @property
     def is_coming_soon(self) -> bool:
@@ -336,6 +386,16 @@ class GameEntry:
     def parse(cls, raw: Any, *, index: int) -> "GameEntry":
         if not isinstance(raw, Mapping):
             raise ManifestSchemaError(f"games[{index}] must be an object")
+        allowed = {
+            "id", "title", "description", "runtime", "launchable", "art",
+            "repository", "ref", "entrypoint", "note", "godot_version",
+            "startup_script", "python_requirements",
+        }
+        unknown = set(raw) - allowed
+        if unknown:
+            raise ManifestSchemaError(
+                f"games[{index}]: unknown fields: {', '.join(sorted(map(str, unknown)))}"
+            )
 
         game_id = _validate_id(raw.get("id"), index=index)
         title = _validate_text(raw.get("title"), game_id=game_id, field_name="title", limit=40)
@@ -359,6 +419,9 @@ class GameEntry:
         repository: str | None = None
         ref: str | None = None
         entrypoint: str | None = None
+        godot_version: GodotVersion | None = None
+        startup_script: str | None = None
+        python_requirements: str | None = None
 
         if launchable:
             repository = _validate_repository(raw.get("repository"), game_id=game_id)
@@ -379,9 +442,45 @@ class GameEntry:
                 field_name="entrypoint",
             )
             entrypoint = str(raw_entrypoint).strip()
+            if runtime is Runtime.GODOT:
+                godot_version = GodotVersion.parse(raw.get("godot_version"), game_id=game_id)
+                if "python_requirements" in raw:
+                    raise ManifestSchemaError(
+                        f"game '{game_id}': python_requirements is only valid for Python"
+                    )
+                path = PurePosixPath(entrypoint)
+                if path.suffix != ".pck" and path.name != "project.godot":
+                    raise ManifestSchemaError(
+                        f"game '{game_id}': Godot entrypoint must be a .pck or project.godot"
+                    )
+                if "startup_script" in raw:
+                    safe_relative_path(
+                        raw["startup_script"], _VALIDATION_ROOT / game_id,
+                        game_id=game_id, field_name="startup_script",
+                    )
+                    startup_script = raw["startup_script"]
+                    if path.suffix != ".pck" or not startup_script.endswith(".gd"):
+                        raise ManifestSchemaError(
+                            f"game '{game_id}': startup_script must be a .gd bootstrap "
+                            "for a .pck entrypoint"
+                        )
+            else:
+                if "godot_version" in raw or "startup_script" in raw:
+                    raise ManifestSchemaError(
+                        f"game '{game_id}': Godot metadata is not valid for Python"
+                    )
+                if "python_requirements" in raw:
+                    safe_relative_path(
+                        raw["python_requirements"], _VALIDATION_ROOT / game_id,
+                        game_id=game_id, field_name="python_requirements",
+                    )
+                    python_requirements = raw["python_requirements"]
         else:
-            for forbidden in ("repository", "ref", "entrypoint"):
-                if raw.get(forbidden):
+            for forbidden in (
+                "repository", "ref", "entrypoint", "godot_version",
+                "startup_script", "python_requirements",
+            ):
+                if forbidden in raw:
                     raise ManifestSchemaError(
                         f"game '{game_id}': coming-soon entries must not define "
                         f"'{forbidden}'; it would imply the launcher may fetch or "
@@ -399,6 +498,9 @@ class GameEntry:
             ref=ref,
             entrypoint=entrypoint,
             note=note.strip(),
+            godot_version=godot_version,
+            startup_script=startup_script,
+            python_requirements=python_requirements,
         )
 
 

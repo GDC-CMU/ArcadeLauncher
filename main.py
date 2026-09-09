@@ -34,6 +34,8 @@ from launcher.errors import (
 )
 from launcher.manifest import load_manifest
 from launcher.paths import MANIFEST_FILE, SETTINGS_FILE, default_cache_root
+from launcher.preparation import PreparationService
+from launcher.runtimes import RuntimeStore
 from launcher.settings import Settings, load_settings
 from launcher.supervisor import SessionState, Supervisor
 from launcher.sync import SyncService, initial_states
@@ -64,6 +66,8 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--cache", type=Path, default=None, help="override the repository cache root"
     )
+    parser.add_argument("--runtime-cache", type=Path, default=None, help="override the user-local native engine cache")
+    parser.add_argument("--game-data-root", type=Path, default=None, help="persistent game saves (outside --cache)")
     parser.add_argument(
         "--no-sync",
         action="store_true",
@@ -145,9 +149,16 @@ def main(argv: list[str] | None = None) -> int:
         return report_fatal(exc, settings)
 
     cache_root = args.cache or default_cache_root()
-    cache = RepositoryCache(
-        cache_root, runner=SubprocessGitRunner(timeout_s=settings.network_timeout_s)
-    )
+    try:
+        cache = RepositoryCache(
+            cache_root, runner=SubprocessGitRunner(timeout_s=settings.network_timeout_s),
+            preparation=PreparationService(
+                cache_root / "prepared", runtimes=RuntimeStore(args.runtime_cache),
+                data_root=args.game_data_root,
+            ),
+        )
+    except LauncherError as exc:
+        return report_fatal(exc, settings)
     online = settings.sync_on_start and not args.no_sync
     if online and not cache.git_available:
         _log.warning("git is not available; running from cache only")

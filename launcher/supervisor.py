@@ -7,8 +7,8 @@ Lifecycle, in one place:
 3. On *quit* the supervisor returns 0 and ``main.py`` calls ``sys.exit(0)``,
    which is the documented way back to the arcade's outer menu.
 4. On *launch* the session has already torn SDL down; the supervisor spawns the
-   game as a child process with ``sys.executable``, an argument list and the
-   game's checkout as ``cwd`` -- never through a shell -- and waits.
+   game using its prepared interpreter/native engine and an argument list,
+   never a shell, and waits inside an owned process-tree boundary.
 5. When the child exits, the supervisor rebuilds the gallery with the same
    selected card and the same view mode, plus an error banner if the child
    failed.
@@ -23,22 +23,23 @@ import logging
 import os
 import signal
 import subprocess
-import sys
 import threading
 from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
-from typing import Callable, Protocol, Sequence
+from typing import Callable, Mapping, Protocol, Sequence
 
 from .cache import RepositoryCache
+from .commands import build_child_command
 from .errors import (
     LaunchError,
     LauncherError,
-    NotLaunchableError,
     UiFatalError,
 )
-from .manifest import GameEntry, Manifest, Runtime
+from .manifest import GameEntry, Manifest, safe_relative_path
+from .integrity import filesystem_path
 from .paths import run_root
+from .processes import OwnedProcess
 from .status import Notice
 from .viewmodes import ViewMode
 
@@ -110,61 +111,13 @@ class ChildResult:
         return self.returncode == 0
 
 
-def _child_process_group_kwargs() -> dict[str, object]:
-    """``Popen`` kwargs that give a launched game its own process group.
-
-    Mirrors the exact same choice already made for git subprocesses (see
-    ``launcher.cache._run_git``): on Windows, a child spawned without
-    ``CREATE_NEW_PROCESS_GROUP`` shares the console's process group with the
-    launcher, so a Ctrl+C typed at that console is delivered to *both*
-    processes at once; on POSIX, ``start_new_session=True`` is the equivalent
-    isolation. Keeping the game in its own group means a Ctrl+C the operator
-    aims at the launcher cannot also be misread by the game's own SDL/input
-    layer, and the two console-signal domains stay cleanly separated instead
-    of overlapping in whatever way the OS happens to resolve it. ``P1``
-    inside the game remains the documented, and only, way to end it.
-    """
-    if os.name == "nt":
-        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
-    return {"start_new_session": True}
-
-
-def build_child_command(entry: GameEntry, checkout: Path) -> list[str]:
-    """Build the argument list used to start *entry*.
-
-    The entrypoint is re-validated against *checkout* here -- not just at
-    manifest load -- so a tampered checkout cannot redirect execution outside
-    the managed cache.  The relative form is passed as ``argv[1]`` and the
-    checkout is used as ``cwd``, which is what puts the game's own directory on
-    ``sys.path[0]`` so its sibling imports resolve.
-
-    Raises:
-        LaunchError: Unsupported runtime, or the entrypoint file is missing.
-        UnsafeEntrypointError: The entrypoint escapes *checkout*.
-        NotLaunchableError: The entry is coming-soon.
-    """
-    if not entry.launchable:
-        raise NotLaunchableError(
-            f"game '{entry.id}' is coming-soon and must never be launched"
-        )
-    if entry.runtime is not Runtime.PYTHON:
-        raise LaunchError(
-            f"game '{entry.id}': runtime '{entry.runtime.value}' cannot be started"
-        )
-    absolute = entry.resolved_entrypoint(checkout)
-    if not absolute.is_file():
-        raise LaunchError(
-            f"game '{entry.id}': entrypoint '{entry.entrypoint}' does not exist in "
-            f"{checkout}"
-        )
-    assert entry.entrypoint  # guaranteed by resolved_entrypoint
-    return [sys.executable, entry.entrypoint]
-
-
 class GameRunner(Protocol):
     """Starts a child game and waits for it. Injected so tests stay hermetic."""
 
-    def run(self, command: Sequence[str], cwd: Path, *, game_id: str) -> ChildResult:
+    def run(
+        self, command: Sequence[str], cwd: Path, *, game_id: str,
+        env: Mapping[str, str] | None = None,
+    ) -> ChildResult:
         """Run *command* in *cwd* and block until it exits."""
 
     def terminate(self) -> None:
@@ -182,71 +135,81 @@ class ProcessGameRunner:
     def __init__(self, log_dir: Path | None = None, tail_lines: int = 4) -> None:
         self._log_dir = Path(log_dir) if log_dir is not None else run_root()
         self._tail_lines = tail_lines
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._process: subprocess.Popen[bytes] | None = None
+        self._owner: OwnedProcess | None = None
+        self._cancelled = threading.Event()
 
     @property
     def is_running(self) -> bool:
         with self._lock:
             return self._process is not None and self._process.poll() is None
 
-    def run(self, command: Sequence[str], cwd: Path, *, game_id: str) -> ChildResult:
+    def run(
+        self, command: Sequence[str], cwd: Path, *, game_id: str,
+        env: Mapping[str, str] | None = None,
+    ) -> ChildResult:
         arguments = list(command)
         if not arguments:
             raise LaunchError("refusing to spawn an empty command")
-        self._log_dir.mkdir(parents=True, exist_ok=True)
-        log_path = self._log_dir / f"{game_id}.child.log"
+        if self._cancelled.is_set():
+            raise LaunchError("launch cancelled by a shutdown request")
+        log_path = safe_relative_path(
+            f"{game_id}.child.log", self._log_dir, game_id=game_id, field_name="child log",
+        )
         _log.info("launching %s: %s (cwd=%s)", game_id, arguments, cwd)
         try:
+            self._log_dir.mkdir(parents=True, exist_ok=True)
+            if env is not None and "ARCADE_GAME_DATA_DIR" in env:
+                data_dir = Path(env["ARCADE_GAME_DATA_DIR"])
+                if not data_dir.is_absolute():
+                    raise LaunchError("ARCADE_GAME_DATA_DIR must be an absolute path")
+                filesystem_path(data_dir).mkdir(parents=True, exist_ok=True)
             with open(log_path, "w+b") as stream:
-                try:
-                    process = subprocess.Popen(  # noqa: S603 - argv list, no shell
-                        arguments,
-                        cwd=str(cwd),
-                        stdout=stream,
-                        stderr=subprocess.STDOUT,
-                        stdin=subprocess.DEVNULL,
-                        **_child_process_group_kwargs(),
-                    )
-                except OSError as exc:
-                    raise LaunchError(f"could not start '{game_id}': {exc}") from exc
+                owner = OwnedProcess(arguments, cwd=cwd, stdout=stream, env=env)
+                process = owner.process
+                assert process is not None
                 with self._lock:
+                    self._owner = owner
                     self._process = process
                 try:
+                    if self._cancelled.is_set():
+                        owner.terminate()
+                        raise LaunchError("launch cancelled by a shutdown request")
                     returncode = process.wait()
                 except KeyboardInterrupt:
                     _log.warning(
                         "Ctrl+C while waiting for %s; terminating it", game_id
                     )
                     self.terminate()
-                    returncode = process.wait()
                     raise
                 finally:
-                    with self._lock:
-                        self._process = None
+                    try:
+                        # Includes helpers surviving a clean parent exit.
+                        owner.close()
+                    finally:
+                        with self._lock:
+                            self._owner = None
+                            self._process = None
                 stream.flush()
-                stream.seek(0)
+                stream.seek(0, os.SEEK_END)
+                stream.seek(max(0, stream.tell() - 65536))
                 tail = self._tail(stream.read())
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise LaunchError(f"could not run/clean up '{game_id}': {exc}") from exc
         finally:
             self._remove(log_path)
         _log.info("%s exited with code %s", game_id, returncode)
         return ChildResult(returncode=returncode, tail=tail)
 
     def terminate(self, grace_s: float = 5.0) -> None:
-        """Terminate the active child, escalating to kill if it ignores us."""
+        """Cancel a pending spawn and terminate its entire owned process tree."""
+        self._cancelled.set()
         with self._lock:
-            process = self._process
-        if process is None or process.poll() is not None:
-            return
-        _log.warning("terminating child process %s", process.pid)
-        try:
-            process.terminate()
-            process.wait(timeout=grace_s)
-        except subprocess.TimeoutExpired:
-            _log.error("child %s ignored terminate; killing", process.pid)
-            process.kill()
-        except OSError as exc:  # already gone
-            _log.info("child could not be terminated (already exited): %s", exc)
+            owner = self._owner
+        if owner is not None:
+            _log.warning("terminating the owned game process tree")
+            owner.terminate(grace_s=grace_s)
 
     def _tail(self, blob: bytes) -> str:
         text = blob.decode("utf-8", errors="replace").strip()
@@ -465,15 +428,19 @@ class Supervisor:
             _log.warning("refusing to launch %s: %s", entry.id, readiness.detail)
             return Notice("error", f"{entry.title} is not ready", readiness.detail)
 
-        checkout = self.cache.checkout_path(entry)
         try:
-            command = build_child_command(entry, checkout)
+            prepared = self.cache.prepared_game(entry)
+            command = build_child_command(
+                prepared.entry, prepared.checkout, executable=prepared.executable,
+            )
         except LauncherError as exc:
             _log.error("cannot build command for %s: %s", entry.id, exc)
             return Notice("error", f"Cannot start {entry.title}", str(exc))
 
         try:
-            result = self.runner.run(command, checkout, game_id=entry.id)
+            result = self.runner.run(
+                command, prepared.checkout, game_id=entry.id, env=prepared.child_environment(),
+            )
         except LaunchError as exc:
             return Notice("error", f"Cannot start {entry.title}", str(exc))
         except KeyboardInterrupt:

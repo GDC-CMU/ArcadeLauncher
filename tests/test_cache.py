@@ -251,6 +251,22 @@ class _FakePopen:
         pass
 
 
+class _FakeOwnedProcess:
+    """No kernel job/process is created by tests of git timeout policy."""
+
+    def __init__(self, process):
+        self.process = process
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return None
+
+    def terminate(self, grace_s=0):
+        return None
+
+
 class SubprocessGitRunnerTests(unittest.TestCase):
     """The real git runner's network-safety behaviour (the offline-speed
     fix: items 1, 3 and 4). Exercised entirely through a mocked
@@ -271,12 +287,22 @@ class SubprocessGitRunnerTests(unittest.TestCase):
             "start-up and again before every launch -- it must stay low",
         )
 
+    def test_git_executable_is_resolved_before_entering_a_game_checkout(self) -> None:
+        trusted = Path(__file__).resolve().parent / "trusted git.exe"
+        with mock.patch("launcher.cache.shutil.which", return_value=str(trusted)):
+            runner = SubprocessGitRunner()
+        with mock.patch(
+            "launcher.cache.OwnedProcess", return_value=_FakeOwnedProcess(_FakePopen()),
+        ) as spawn:
+            self.assertTrue(runner.run(["fetch", "origin", "main"], Path("checkout")).ok)
+        self.assertEqual(spawn.call_args.args[0][0], str(trusted))
+
     def test_run_disables_credential_prompts_and_uses_the_configured_timeout(
         self,
     ) -> None:
         runner = SubprocessGitRunner(timeout_s=7)
         fake = _FakePopen()
-        with mock.patch("launcher.cache.subprocess.Popen", return_value=fake) as popen:
+        with mock.patch("launcher.cache.OwnedProcess", return_value=_FakeOwnedProcess(fake)) as popen:
             runner.run(["fetch", "origin", "main"], Path("checkout"))
 
         self.assertEqual(fake.communicate_timeout, 7)
@@ -292,8 +318,8 @@ class SubprocessGitRunnerTests(unittest.TestCase):
         runner = SubprocessGitRunner(clock=_fake_clock(0.0, 5.0))
         with (
             mock.patch(
-                "launcher.cache.subprocess.Popen",
-                return_value=_FakePopen(timeout_once=True),
+                "launcher.cache.OwnedProcess",
+                return_value=_FakeOwnedProcess(_FakePopen(timeout_once=True)),
             ) as popen,
             mock.patch("launcher.cache._kill_process_tree"),
         ):
@@ -301,7 +327,7 @@ class SubprocessGitRunnerTests(unittest.TestCase):
         self.assertFalse(first.ok)
         self.assertEqual(popen.call_count, 1)
 
-        with mock.patch("launcher.cache.subprocess.Popen") as popen_again:
+        with mock.patch("launcher.cache.OwnedProcess") as popen_again:
             second = runner.run(["fetch", "origin", "main"], Path("checkout"))
         self.assertFalse(second.ok)
         self.assertEqual(
@@ -315,15 +341,15 @@ class SubprocessGitRunnerTests(unittest.TestCase):
         runner = SubprocessGitRunner(clock=_fake_clock(0.0, _NETWORK_RETRY_COOLDOWN_S + 40.0))
         with (
             mock.patch(
-                "launcher.cache.subprocess.Popen",
-                return_value=_FakePopen(timeout_once=True),
+                "launcher.cache.OwnedProcess",
+                return_value=_FakeOwnedProcess(_FakePopen(timeout_once=True)),
             ),
             mock.patch("launcher.cache._kill_process_tree"),
         ):
             runner.run(["fetch", "origin", "main"], Path("checkout"))
 
         with mock.patch(
-            "launcher.cache.subprocess.Popen", return_value=_FakePopen()
+            "launcher.cache.OwnedProcess", return_value=_FakeOwnedProcess(_FakePopen())
         ) as popen_again:
             second = runner.run(["fetch", "origin", "main"], Path("checkout"))
         self.assertTrue(second.ok)
@@ -336,16 +362,16 @@ class SubprocessGitRunnerTests(unittest.TestCase):
         runner = SubprocessGitRunner(clock=_fake_clock(0.0))
         with (
             mock.patch(
-                "launcher.cache.subprocess.Popen",
-                return_value=_FakePopen(timeout_once=True),
+                "launcher.cache.OwnedProcess",
+                return_value=_FakeOwnedProcess(_FakePopen(timeout_once=True)),
             ),
             mock.patch("launcher.cache._kill_process_tree"),
         ):
             runner.run(["fetch", "origin", "main"], Path("checkout"))
 
         with mock.patch(
-            "launcher.cache.subprocess.Popen",
-            return_value=_FakePopen(stdout="abc1234\n"),
+            "launcher.cache.OwnedProcess",
+            return_value=_FakeOwnedProcess(_FakePopen(stdout="abc1234\n")),
         ) as popen_again:
             result = runner.run(["rev-parse", "--short", "HEAD"], Path("checkout"))
         self.assertTrue(result.ok)

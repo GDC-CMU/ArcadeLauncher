@@ -50,8 +50,13 @@ main.py                    arcade entrypoint: parse args, wire everything, exit 
 │   ├── settings.py        config/launcher.json + ARCADE_LAUNCHER_* env overrides
 │   ├── viewmodes.py       the ViewMode enum and its cycle order
 │   ├── status.py          GameState / GameStatus / Notice — what a card says
-│   ├── cache.py           the on-disk git checkout cache (clone, update, verify)
-│   ├── sync.py            background updates on a worker thread
+│   ├── cache.py           staged git candidates, promotion, last-good and rollback
+│   ├── runtimes.py        pinned/checksummed user-local native Godot engines
+│   ├── preparation.py     isolated Python deps, native imports, readiness receipts
+│   ├── integrity.py       contained, checksummed, long-path-safe file verification
+│   ├── commands.py        direct Python/Godot argv construction, no shell
+│   ├── processes.py       owned process groups / Windows kill-on-close jobs
+│   ├── sync.py            once-per-startup updates/preparation on a worker thread
 │   ├── controls.py        the arcade button map (b=0 … p1=5 … Start=9)
 │   ├── input_state.py     axis deadzone, debounce, auto-repeat
 │   ├── attract.py         the idle-triggered attract-mode state machine
@@ -72,20 +77,21 @@ main.py                    arcade entrypoint: parse args, wire everything, exit 
 │   ├── scene.py           picks the view and renders it
 │   └── fatal.py           branded on-screen error, for failures before the gallery
 │
-└── tools/generate_previews.py   renders the screenshots in this README
+└── tools/                 generate_previews.py · prepare_games.py (operator staging)
 ```
 
 ### The supervisor loop and the two-level exit
 
-The single most important design decision is that the launcher and a game are
-**never alive at the same time**.
+The single most important design decision is that the gallery and a playing
+game **never own the display/audio/joysticks at the same time**. The pure-logic
+supervisor remains alive while it waits for the child.
 
 ```
 Supervisor.run()
   ├─▶ GallerySession(state)          SDL up · browse · returns UiOutcome
   │     └─ finally: release SDL      display, audio and joysticks handed back
-  ├─▶ ProcessGameRunner(...)         [sys.executable, "main.py"] with cwd=<checkout>
-  │     └─ waits for the child to exit; captures its output to a file
+  ├─▶ ProcessGameRunner(...)         verified Python interpreter or native Godot
+  │     └─ waits for the child; captures output; cleans its owned process tree
   └─▶ back to GallerySession(state)  with a notice if the child crashed
 ```
 
@@ -99,11 +105,13 @@ This produces the **two-level exit** a visitor experiences:
 
 | Where you are | Press `P1` | What happens |
 | --- | --- | --- |
-| Inside a game | `P1` | The game exits. You are back at the gallery. |
+| Inside a game | The game's tested back/menu action (usually `P1`) | Back one level: pause, menu, then root-menu exit returns to the gallery. |
 | At the gallery | `P1` | The launcher exits `0`. You are back at the arcade menu. |
 
-Nobody has to learn two different buttons. The same button always means *"take
-me back one level."*
+The game owns its back/pause handling; the launcher does not globally translate
+`B` into Escape or intercept combat buttons. Godot's normalized joypad indices
+must be mapped and tested in-engine, not assumed to equal pygame's raw USB
+indices. Gallery bindings below remain unchanged.
 
 ## Controls
 
@@ -189,6 +197,7 @@ Useful flags while developing:
 python main.py --no-sync      # never touch the network; use whatever is cached
 python main.py --verbose      # log every cache and subprocess decision
 python main.py --cache /tmp/x # put the game checkouts somewhere disposable
+python main.py --runtime-cache /tmp/engines --game-data-root /tmp/saves
 python main.py --help         # the full list
 ```
 
@@ -201,10 +210,15 @@ python -m tools.generate_previews
 
 The test suite is fully offline and headless — it clones only local fixture
 repositories and forces the SDL dummy driver, so it is safe to run anywhere.
+Runtime/dependency tests use fake engines/network/pip fixtures; owned-tree tests
+spawn real, short-lived Python children. Real Godot/display/controller probes
+are separate from the unit suite.
 
 ## Deploying to the CMU-Q arcade
 
-The cabinet is a RetroPie Linux box (x86-64, Python 3.10). Games live in
+The cabinet is an Ubuntu 22.04 x86-64 PC (glibc 2.35, Python 3.10), not an ARM
+Raspberry Pi. Its Intel HD 530 supports Godot's Compatibility renderer.
+The outer menu uses RetroPie conventions. Games live in
 `/home/es/RetroPie/roms/cmu_graphics/<Name>.git`, and **the directory name is
 what appears on the outer menu** — so name it the way you want visitors to read
 it. The `.git` suffix is part of the convention on that box, alongside
@@ -220,15 +234,20 @@ cd /home/es/RetroPie/roms/cmu_graphics
 git clone https://github.com/GDC-CMU/ArcadeLauncher.git "Arcade-Launcher.git"
 ```
 
-Then restart the box and the new entry appears on the menu.
+The coordinator refreshes the outer menu through the approved deployment
+workflow. Runtime preparation does not require rebooting, changing GPU drivers,
+installing Godot system-wide, or replacing system Python.
 
 > The deploy-key and SSH-host-alias procedure in the maintainer's instructions
 > is only needed for **private** repositories. This one is public.
 
-After that, a deploy is just a push to `main` — the cabinet pulls it on the next
-boot. What that means for this repository:
+Only the coordinator publishes/promotes staged, tested revisions and enables
+catalog entries. A successful import or headless start is **not** controller/
+display/gameplay acceptance. What that means for this repository:
 
-1. **Merge to `main`.** The cabinet pulls this branch; there is no build step.
+1. **Publish approved launcher support before activating dependent entries.**
+   The outer menu pulls `main`; game runtimes/artifacts have their own
+   preparation step described below.
 2. **Keep `main.py` at the repository root.** The arcade menu invokes it by that
    exact path. Do not rename or move it.
 3. **Do not assume a working directory.** It is not documented which directory
@@ -243,9 +262,10 @@ boot. What that means for this repository:
    it could not start at all, and in that case it first paints a readable,
    branded error screen so a club member standing at the cabinet can see what
    went wrong instead of a black rectangle.
-6. **First boot needs the network.** The initial run clones each launchable game
-   — StreetFighter included — into `.arcade-cache/games/<id>`. Do this while the
-   box still has network. After that the cabinet can run indefinitely offline.
+6. **Prepare while the network is available.** The startup worker clones missing
+   launchable games, provisions pinned engines and prepares dependencies/imports.
+   Do this before visitors arrive, or use the separate staging tool. Only fully
+   prepared releases are playable offline.
 
 The display is opened at **800×600** with `pygame.SCALED`, so SDL letterboxes the
 gallery onto whatever panel is fitted without the layout changing.
@@ -338,21 +358,22 @@ layer does with a console signal can never be mistaken for one another.
 
 ## Offline behaviour
 
-**Yes, the cabinet works with no Wi-Fi.** Every game already cached keeps
-playing exactly as before; the gallery stays fully interactive and browsable;
-cards that are cached read `CACHED OFFLINE` instead of `PLAYABLE`, and only a
-game that has *never* downloaded successfully on this cabinet shows
-`UNAVAILABLE`. The one real requirement is that each game needs the network
-**once**, the first time it is ever added — after that first successful
-clone, it is on disk for good and a dead network cannot take it away.
+**Yes, the cabinet works with no Wi-Fi.** Fully prepared games keep playing;
+the gallery stays interactive. A usable last-good release reads `CACHED OFFLINE`
+when an update/preparation fails. A missing or corrupt engine, dependency
+environment, entrypoint or prepared artifact makes **that game** `UNAVAILABLE`,
+with a reason, rather than crashing the gallery or guessing another runtime.
 
 Game checkouts live in `.arcade-cache/` (git-ignored, never committed). Each
 launcher process checks its launchable games **once at startup**, on a background
 thread while the gallery remains browsable. Missing games are cloned; installed
-games are fetched for changes, not downloaded from scratch.
+games are fetched for changes. Candidates are checked out from a local fetch of
+the already downloaded objects, not downloaded from GitHub a second time.
 
 **Playing again does not contact GitHub.** Launching a game and returning to the
-gallery reuse the checked local copies. Duplicate sync requests are ignored,
+gallery reuse the checked local copies and prepared runtime. No download, pip,
+Godot import/export, or game probe occurs on Play or gallery return. Disk-only
+safety checks still reject a disappeared or modified artifact. Duplicate sync requests are ignored,
 including after a failed check. To pick up a newly published build or retry after
 Wi-Fi returns, exit and restart the launcher. There is no multi-hour freshness
 timer and no new maintenance control: a new process starts a new check.
@@ -370,9 +391,9 @@ latest?" without needing a terminal:
 | Badge | Meaning |
 | --- | --- |
 | `PLAYABLE` | Cached and verified by this process's startup check. Press `A` to start it. Its detail line identifies the installed commit. |
-| `UPDATING` | The startup check is pending or running. Wait for it to finish before launching this game; browsing remains available. |
+| `UPDATING` | Startup fetch/runtime/dependency/import preparation is running. Browsing remains available. |
 | `CACHED OFFLINE` | The update failed, but a good checkout is already there. Fully playable, and its detail line still names the cached commit. |
-| `UNAVAILABLE` | Never successfully downloaded on this cabinet. Not playable. |
+| `UNAVAILABLE` | No usable prepared release (missing/damaged source, runtime, deps or artifact). The detail explains why. |
 | `COMING SOON` | Curated in the manifest but not released yet. Not playable. |
 | `QUEUED` | Waiting its turn in the sync queue. |
 
@@ -382,18 +403,97 @@ visitor.
 
 The rules that follow from this:
 
-- **A failed update never removes a working game.** A fetch that fails downgrades
-  the badge to `OFFLINE` and leaves the checkout alone.
+- **A failed update never replaces a working game.** Fetch changes objects/refs
+  only. Preparation runs against a separate candidate. Source plus its
+  successful preparation receipt are promoted together only when ready; the
+  whole previous checkout is retained for rollback. There is no in-place
+  `reset --hard` or `git clean`.
+- **Source edits and saves survive.** Tracked edits/untracked work block
+  promotion. Ignored files are copied and checked again before promotion;
+  a new tracked file colliding with ignored data blocks the update. New games
+  store saves in `ARCADE_GAME_DATA_DIR`, outside disposable caches.
 - **A ready game launches locally.** No new fetch is requested on Play or on
   gallery return. A checkout guard prevents an update from modifying files
   while that game's child process is running.
 - **Coming-soon entries never touch the network.** They structurally carry no
   repository, ref or entrypoint, so there is nothing to clone.
-- **Nothing outside the cache is ever executed.** Every entrypoint is resolved
-  against its own checkout directory and rejected if it escapes — `..`, absolute
-  paths and symlink tricks all fail validation before a process is spawned.
+- **No arbitrary manifest commands.** Entrypoints, pack bootstraps and
+  requirements must remain contained in their checkout/prepared snapshot.
+  Execution uses a verified user-local engine/interpreter and argv lists,
+  never a shell, PATH-selected Godot, browser, Wine or console wrapper.
 - **`--no-sync` is a hard promise.** In offline mode `git` is not invoked at all:
   startup and pre-launch readiness checks verify only what is already on disk.
+
+### Native engines, preparation and persistent data
+
+See [the runtime/operator contract](docs/native-runtime/interfaces.md) for the
+exact schema, APIs, checksums, preparation limits and rollback commands.
+
+| Location | Linux default | Windows default |
+| --- | --- | --- |
+| Source/staging/rollback/prepared artifacts | `<launcher>/.arcade-cache/` | `<launcher>\.arcade-cache\` |
+| Godot engines | `$XDG_CACHE_HOME/arcade-launcher/runtimes` (`~/.cache` if unset) | `%LOCALAPPDATA%\GDC-CMU\ArcadeLauncher\runtimes` |
+| Persistent game data | `$XDG_DATA_HOME/arcade-launcher/games/<id>` (`~/.local/share` if unset) | `%LOCALAPPDATA%\GDC-CMU\ArcadeLauncher\userdata\<id>` |
+
+`ARCADE_LAUNCHER_RUNTIME_CACHE` and `ARCADE_LAUNCHER_DATA_ROOT` can override
+the last two roots with absolute paths. Data roots may not overlap disposable
+caches. `--runtime-cache` / `--game-data-root` are their CLI equivalents.
+
+Every child receives `ARCADE_MODE=1` and `ARCADE_GAME_DATA_DIR`. For Godot only,
+the child's `APPDATA` (Windows) or `XDG_DATA_HOME` (Linux) is also redirected
+to that per-game directory, so even compiled `user://high_score.save` paths
+remain durable without changing the pack. Godot appends its normal
+project-specific subdirectory. Preparation probes use disposable userdata
+elsewhere. The launcher's environment and legacy Python OS save locations are
+unchanged; migrating pre-existing Godot saves is an explicit operator step.
+
+Only standard **Godot 4.4.1-stable and 4.5.2-stable**, Linux/Windows x86_64,
+are supported. The official platform ZIP is SHA512-verified before extraction,
+then the executable is checked against that archive and version-probed. The ZIP
+is retained for offline repair and independent verification on later startups.
+No Mono builds, export templates or unrelated platforms are downloaded.
+
+Source `project.godot` entries are imported into a versioned snapshot and run
+directly with the native engine. Exported `.pck` entries use `--main-pack`.
+Both use `--rendering-method gl_compatibility`. Windows file verification handles
+long imported paths without requiring a registry change.
+
+New Python adapters declare `python_requirements`. The service fingerprints
+requirements (including contained `-r`/`-c` includes) plus interpreter ABI,
+prepares a `venv --copies` without system site packages, installs there, runs
+`pip check`, and inventories installed files. It never upgrades the launcher's
+pygame installation. The existing three Python games may omit this field and
+keep the current interpreter.
+
+Operator examples — use **separate staged paths and a staged manifest** while
+validating candidates; do not activate a shipped disabled entry just to test it:
+
+```bash
+python -m tools.prepare_games --manifest /staging/games.json --cache /staging/cache --game-data-root /staging/saves
+python -m tools.prepare_games --manifest /staging/games.json --cache /staging/cache --game-data-root /staging/saves --verify-only
+python -m tools.prepare_games --manifest /staging/games.json --cache /staging/cache --game-data-root /staging/saves --offline
+python -m tools.prepare_games --manifest /staging/games.json --game flappy-scotty --checkout "/staging/cache/games/flappy-scotty" --cache /staging/cache --game-data-root /staging/saves --offline
+```
+
+The first prepares once; `--verify-only` performs no subprocesses/writes/network;
+`--offline` explicitly permits local engine repair/import preparation but no
+downloads. A failed candidate returns a nonzero tool exit code even when
+last-good is still playable. Ordinary `main.py --no-sync` never prepares.
+
+`--checkout` prepares one explicit staged checkout's current dirty/untracked
+files without any git sync or source promotion. It requires an enabled entry
+in the **staged** manifest, one `--game`, and explicit cache/data roots.
+Godot snapshots are keyed by actual content rather than Git HEAD; operator
+verification detects candidate edits even when last-good is still playable.
+To exercise the gallery, use `<cache>/games/<id>` as that staged checkout and
+run `main.py --no-sync` with the same roots/manifest. An arbitrary external
+checkout is not automatically installed into the managed cache. See the
+[API/staging examples](docs/native-runtime/interfaces.md#explicit-candidate-staging-including-dirty-sources).
+
+Children, git helpers and preparation commands have owned lifetimes. POSIX uses
+a separate session/process group with terminate/kill escalation; Windows starts
+suspended, joins a kill-on-close Job Object, then resumes. Helpers are cleaned
+after normal exit, crash, timeout and cancellation, not just parent-PID kills.
 
 ## Screenshots
 
@@ -515,18 +615,20 @@ The gallery is **curated**: it shows exactly what `data/games.json` lists, in th
 order. Nothing is discovered automatically, because an arcade at a club fair is
 the wrong place to find out that somebody's work-in-progress does not start.
 
-Add an entry and open a pull request:
+Prepare and test an entry in a separate manifest first. This is a **schema
+example**, not a claim that Flappy is activated or its cabinet adapter accepted:
 
 ```json
 {
   "id": "flappy-scotty",
   "title": "Flappy Scotty",
   "description": "Navigate through tricky obstacles and protect Scotty.",
-  "runtime": "python",
+  "runtime": "godot",
+  "godot_version": "4.4.1-stable",
   "launchable": true,
   "repository": "https://github.com/GDC-CMU/FlappyScotty.git",
   "ref": "main",
-  "entrypoint": "main.py",
+  "entrypoint": "Flappy Scotty.pck",
   "art": { "motif": "flight", "palette": ["electric_cyan", "warm_amber", "ink"], "seed": 3303 }
 }
 ```
@@ -536,16 +638,21 @@ Add an entry and open a pull request:
 | `id` | yes | Lowercase, `a–z 0–9 -`. Also the cache directory name. |
 | `title` | yes | Shown on the card. |
 | `description` | yes | One or two sentences; the views wrap it for you. |
-| `runtime` | yes | `python` today. |
+| `runtime` | yes | `python` or `godot`. Unknown values are rejected. |
 | `launchable` | yes | `false` renders a `COMING SOON` card and nothing is cloned. |
-| `repository` | if launchable | Must be `https://`. `git@`, `http://` and `file://` are rejected. |
-| `ref` | if launchable | Branch or tag to pin. |
-| `entrypoint` | if launchable | Repo-relative path. Must stay inside the checkout. |
+| `repository` | if launchable | Credential-free `https://`, no query/fragment. |
+| `ref` | if launchable | Branch, tag, or full 40-character commit SHA. |
+| `entrypoint` | if launchable | Contained relative Python script, `.pck`, or `project.godot`. Spaces are supported. |
+| `godot_version` | Godot only | Exactly `4.4.1-stable` or `4.5.2-stable`. |
+| `startup_script` | optional, Godot pack only | Contained relative `.gd` bootstrap, passed as one `--script` argument. |
+| `python_requirements` | new Python adapters | Contained relative requirements file for an isolated environment; may be empty for stdlib-only games. |
 | `note` | no | Small print under the description. |
-| `art` | no | `motif`, a three-colour `palette` and a `seed` for the generated cover. |
+| `art` | yes | `motif`, a three-colour `palette` and a `seed` for the generated cover. |
 
-Approving a game means flipping `launchable` to `true` and filling in
-`repository`, `ref` and `entrypoint`. Then:
+Only after the native/controller/offline/save/return-to-gallery gate passes
+does the coordinator fill in delivery metadata and set `launchable` to `true`.
+Disabled entries carry no delivery/preparation metadata and are never fetched.
+The current shipped catalog deliberately still has three enabled games. Then:
 
 ```bash
 python -m unittest discover -s tests -v    # validates the shipped manifest
@@ -559,18 +666,24 @@ named field and a readable message — the cabinet tells you which game is wrong
 
 To be launchable from this gallery, a game must:
 
-1. **Be a public repository under `https://`.** Cloned shallow, single-branch,
-   pinned to `ref`.
-2. **Start from one file.** Run as `[sys.executable, "<entrypoint>"]` with the
-   working directory set to its own checkout. Relative asset paths therefore work
-   unchanged.
-3. **Own the display.** The launcher has fully released SDL. The game calls
-   `pygame.init()` and opens its own window, exactly as it would standalone.
-4. **Exit on `P1` (button 5).** `sys.exit(0)` is enough. That is what returns the
-   visitor to the gallery.
+1. **Be a public repository under `https://`.** Cloned shallow and pinned to `ref`.
+2. **Declare its runtime and one contained entrypoint.** Python runs with its
+   prepared interpreter and checkout cwd; legacy Python retains `sys.executable`.
+   Godot runs directly from its prepared snapshot, not an orphan-prone wrapper.
+3. **Own the display while playing.** The gallery has fully released SDL before
+   the child starts, and rebuilds its renderer/fonts after the child finishes.
+4. **Provide a complete controller lifecycle.** Start, real play, pause/back,
+   retry and root-menu exit must work without mouse, keyboard or terminal.
+   A Python `sys.exit(0)` or Godot `get_tree().quit()` at the root returns to the
+   gallery. Back from gameplay may first pause or return to an in-game menu.
 5. **Exit eventually.** The launcher waits for the child. A game that never exits
    holds the cabinet.
 6. **Not require the network at runtime.** The fair's Wi-Fi will not be there.
+7. **Use `ARCADE_GAME_DATA_DIR` for new arcade saves.** Every child also receives
+   `ARCADE_MODE=1`. Keep a standalone fallback when these variables are absent.
+   Do not put new persistent data in a venv, import directory or disposable build.
+8. **Keep helpers in the owned process group/job.** Do not daemonize, detach a
+   POSIX session or spawn a background server that escapes the supervisor.
 
 No import of the launcher, no shared globals, no subclassing. Games stay
 standalone programs — `StreetFighter` runs from this gallery **unmodified**.
@@ -611,9 +724,11 @@ assets/preview/frame_001.png
 | Symptom | Cause | Fix |
 | --- | --- | --- |
 | Branded error screen at start-up | The manifest or config file is invalid, or unreadable | The screen names the file and the field. Fix it and re-run. |
-| A card shows `UNAVAILABLE` | The game has never cloned successfully here | Check the network, then `python main.py --verbose` and read the git error. |
+| A card shows `UNAVAILABLE` | Source, runtime, dependencies or artifact are missing/damaged | Read its detail; run explicit staged preparation. Play never downloads a missing engine. |
 | Every card shows `CACHED OFFLINE` | No network, but the cache is good | Nothing to do — cached games still play. |
-| `COMING SOON` on a released game | `launchable` is still `false` | Set it to `true` and fill in `repository`, `ref`, `entrypoint`. |
+| `COMING SOON` on a released game | Activation has not been approved/published | Coordinator completes the cabinet gate before enabling the entry. |
+| `CACHED OFFLINE` mentions local edits or an ignored-data collision | An update would discard work or overwrite user data | Preserve/review that work separately; the launcher will not reset/clean it. |
+| Runtime ZIP or executable checksum failure | Damaged/incomplete native installation | Explicit preparation can repair from the verified retained ZIP offline, or redownload the pinned archive online. |
 | "That game isn't ready yet" toast | You pressed Play on a non-playable card | Expected. The launcher refuses rather than failing halfway. |
 | Game starts, then the gallery reappears with a banner | The child exited non-zero | The banner shows the exit code; `--verbose` logs the child's output. |
 | Joystick does nothing | It was plugged in after start-up | Hot-plug is handled; if not, restart the launcher. |
@@ -636,7 +751,8 @@ Ten minutes before the doors open, on the cabinet:
 4. **While you still have network**, run `python main.py` once and wait for every
    card to leave `UPDATING`. This fills the cache for the day.
 5. Check the badges: every game you intend to demo reads `PLAYABLE`.
-6. Launch each demo game and press `P1` — confirm you land back at the gallery.
+6. Launch each demo, exercise play/pause/retry/back and root-menu exit — confirm
+   you land back at the gallery with no lingering helper/window/audio.
 7. From the gallery press `P1` — confirm you land back at the arcade menu.
 8. Press `Select` three times — confirm all three views render and come back
    around to where you started.

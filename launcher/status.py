@@ -23,11 +23,11 @@ class GameStatus(Enum):
     COMING_SOON = "COMING SOON"
     #: Queued for a background sync but not started yet.
     PENDING = "QUEUED"
-    #: A background clone/fetch is currently running.
+    #: A startup clone/fetch, dependency install, or native preparation is running.
     UPDATING = "UPDATING"
-    #: Checkout is present and up to date; the game can be launched.
+    #: Source, runtime, dependencies and prepared artifact are verified for play.
     READY = "READY"
-    #: Refresh failed but a previously cached checkout is still usable.
+    #: Refresh/preparation failed but a last-good prepared release is still usable.
     CACHED_OFFLINE = "CACHED OFFLINE"
     #: No usable checkout. Cannot be launched; an error message is shown.
     UNAVAILABLE = "UNAVAILABLE"

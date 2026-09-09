@@ -22,6 +22,8 @@ __all__ = [
     "GitUnavailableError",
     "SyncFailedError",
     "MissingEntrypointError",
+    "RuntimeProvisionError",
+    "PreparationError",
     "NotLaunchableError",
     "LaunchError",
     "PygameUnavailableError",
@@ -115,6 +117,18 @@ class MissingEntrypointError(CacheError):
     """The checkout exists but the configured entrypoint file does not."""
 
     headline = "Entrypoint missing"
+
+
+class RuntimeProvisionError(CacheError):
+    """A pinned native runtime is missing, damaged, or could not be installed."""
+
+    headline = "Runtime not ready"
+
+
+class PreparationError(CacheError):
+    """A candidate's dependencies or native artifacts are not ready for play."""
+
+    headline = "Preparation failed"
 
 
 # --------------------------------------------------------------------------

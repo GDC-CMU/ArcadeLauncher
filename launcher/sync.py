@@ -82,6 +82,7 @@ class SyncService:
         """Start the worker thread (no-op if it is already running)."""
         if self.is_running:
             return
+        self._cache.begin_startup()
         self._stopping.clear()
         self._thread = threading.Thread(
             target=self._work, name="arcade-sync", daemon=True
@@ -96,6 +97,7 @@ class SyncService:
         pathological hang cannot keep the process alive.
         """
         self._stopping.set()
+        self._cache.cancel_preparation()
         self._requests.put(_STOP)
         thread, self._thread = self._thread, None
         if thread is not None and thread.is_alive():
@@ -128,7 +130,7 @@ class SyncService:
             if entry.id in self._requested_ids:
                 return False
             self._requested_ids.add(entry.id)
-            detail = "contacting GitHub" if self._online else "checking cache"
+            detail = "checking updates and preparing runtime" if self._online else "checking cache"
             self._results.put(GameState(entry.id, GameStatus.UPDATING, detail))
             self._requests.put(entry)
         return True

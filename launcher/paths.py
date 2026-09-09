@@ -20,6 +20,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from .errors import SettingsError
+
 __all__ = [
     "REPO_ROOT",
     "ASSETS_DIR",
@@ -36,6 +38,8 @@ __all__ = [
     "games_root",
     "run_root",
     "checkout_dir",
+    "default_runtime_root",
+    "default_game_data_root",
 ]
 
 #: Repository root -- ``launcher/paths.py`` lives one directory below it.
@@ -60,6 +64,36 @@ CACHE_DIR_NAME = ".arcade-cache"
 
 #: Environment variable that relocates the managed cache (used by tests).
 CACHE_ROOT_ENV = "ARCADE_LAUNCHER_CACHE"
+
+
+def _absolute_override(name: str, fallback: Path) -> Path:
+    value = os.environ.get(name)
+    path = Path(value).expanduser() if value else fallback
+    if not path.is_absolute():
+        raise SettingsError(f"{name} must be an absolute path, not {path!s}")
+    return path
+
+
+def default_runtime_root() -> Path:
+    """User-owned engine cache, independent of disposable game checkouts."""
+    if os.name == "nt":
+        local = _absolute_override("LOCALAPPDATA", Path.home() / "AppData" / "Local")
+        fallback = local / "GDC-CMU" / "ArcadeLauncher" / "runtimes"
+    else:
+        cache = _absolute_override("XDG_CACHE_HOME", Path.home() / ".cache")
+        fallback = cache / "arcade-launcher" / "runtimes"
+    return _absolute_override("ARCADE_LAUNCHER_RUNTIME_CACHE", fallback)
+
+
+def default_game_data_root() -> Path:
+    """Persistent saves: never under a build, venv, rollback, or runtime cache."""
+    if os.name == "nt":
+        local = _absolute_override("LOCALAPPDATA", Path.home() / "AppData" / "Local")
+        fallback = local / "GDC-CMU" / "ArcadeLauncher" / "userdata"
+    else:
+        data = _absolute_override("XDG_DATA_HOME", Path.home() / ".local" / "share")
+        fallback = data / "arcade-launcher" / "games"
+    return _absolute_override("ARCADE_LAUNCHER_DATA_ROOT", fallback)
 
 
 def default_cache_root() -> Path:

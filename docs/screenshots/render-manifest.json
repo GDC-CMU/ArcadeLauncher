@@ -19,21 +19,21 @@
   "generated_by": "python -m tools.generate_previews",
   "screenshots": {
     "carousel.png": {
-      "sha256": "d35d8f660ebc9beb54811c7b351293a379c4c8ccc8c36a0e01cbf6a0e8063977",
+      "sha256": "39c24ca7f19f60a9a35bb764fad519766254ffca5be8f896d76989fc3819a6d3",
       "size": [
         800,
         600
       ]
     },
     "cover-flow.png": {
-      "sha256": "4bb9a6e12d68966942bd0d465caee535c0a3a504f89e874cef36d37d4815a6c8",
+      "sha256": "d457854f9feb61217485c39c3dcc78a27dd1bfd85fbde3a24e0c8fbed98b0d98",
       "size": [
         800,
         600
       ]
     },
     "grid.png": {
-      "sha256": "9512af4ae0b8e659d6df944c0c7e1366c943820a52b381ffc5b16a3f77491ffb",
+      "sha256": "4959847eb729de6fed70b514a2fcb88549d2279c3de97d22d7401ff14a942d0b",
       "size": [
         800,
         600
@@ -47,5 +47,5 @@
       ]
     }
   },
-  "source_fingerprint": "5f52f99a72c6cd0c691c44bcdc05bac73d4c2b034f466e68c432aa6d67af34ac"
+  "source_fingerprint": "86654df33436c975c20836ff2e9accee5942f5ad184c98e5ec400a31699144c6"
 }

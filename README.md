@@ -508,7 +508,7 @@ same size, same position. Everything that makes the three modes look
 different lives in the content area below it.
 
 They show the shipped `data/games.json` exactly as a healthy cabinet would --
-three playable games and five in development. Availability lives entirely on the
+eight accepted games, including two native Godot games. Availability lives entirely on the
 per-card badge; nothing here is a mock-up.
 
 `docs/screenshots/render-manifest.json` records the SHA-256 of every PNG, a
@@ -615,8 +615,8 @@ The gallery is **curated**: it shows exactly what `data/games.json` lists, in th
 order. Nothing is discovered automatically, because an arcade at a club fair is
 the wrong place to find out that somebody's work-in-progress does not start.
 
-Prepare and test an entry in a separate manifest first. This is a **schema
-example**, not a claim that Flappy is activated or its cabinet adapter accepted:
+Prepare and test new entries in a separate manifest first. Flappy's accepted
+original-pack adapter illustrates the native runtime fields:
 
 ```json
 {
@@ -629,6 +629,7 @@ example**, not a claim that Flappy is activated or its cabinet adapter accepted:
   "repository": "https://github.com/GDC-CMU/FlappyScotty.git",
   "ref": "main",
   "entrypoint": "Flappy Scotty.pck",
+  "startup_script": "arcade/bootstrap.gd",
   "art": { "motif": "flight", "palette": ["electric_cyan", "warm_amber", "ink"], "seed": 3303 }
 }
 ```
@@ -652,7 +653,7 @@ example**, not a claim that Flappy is activated or its cabinet adapter accepted:
 Only after the native/controller/offline/save/return-to-gallery gate passes
 does the coordinator fill in delivery metadata and set `launchable` to `true`.
 Disabled entries carry no delivery/preparation metadata and are never fetched.
-The current shipped catalog deliberately still has three enabled games. Then:
+The current shipped catalog enables all eight accepted club games. After a catalog change:
 
 ```bash
 python -m unittest discover -s tests -v    # validates the shipped manifest

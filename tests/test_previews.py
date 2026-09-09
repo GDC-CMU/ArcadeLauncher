@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import support  # noqa: F401 - pins SDL to the dummy drivers before pygame loads
 import contextlib
+from dataclasses import replace
 import hashlib
 import io
 import tempfile
@@ -73,12 +74,18 @@ class HonestyTests(unittest.TestCase):
         self.manifest = _manifest()
         self.states = cabinet_states(self.manifest)
 
+    def disabled_fixture(self):
+        entry = replace(self.manifest[0], launchable=False, repository=None, ref=None, entrypoint=None)
+        manifest = replace(self.manifest, games=(entry, *self.manifest.games[1:]))
+        return manifest, entry, cabinet_states(manifest)
+
     def test_no_coming_soon_game_is_given_a_sync_only_status(self) -> None:
-        for entry in self.manifest:
+        manifest, _, states = self.disabled_fixture()
+        for entry in manifest:
             if entry.launchable:
                 continue
             with self.subTest(game=entry.id):
-                status = self.states[entry.id].status
+                status = states[entry.id].status
                 self.assertIs(status, GameStatus.COMING_SOON)
                 self.assertFalse(status.requires_sync)
 
@@ -89,25 +96,24 @@ class HonestyTests(unittest.TestCase):
                     self.assertTrue(self.states[entry.id].status.is_playable)
 
     def test_the_guard_rejects_an_impossible_state(self) -> None:
-        coming_soon = next(e for e in self.manifest if not e.launchable)
-        rigged = dict(self.states)
+        manifest, coming_soon, rigged = self.disabled_fixture()
         rigged[coming_soon.id] = GameState(
             coming_soon.id, GameStatus.UPDATING, "impossible"
         )
         with self.assertRaises(ValueError) as caught:
-            assert_states_are_reachable(self.manifest, rigged)
+            assert_states_are_reachable(manifest, rigged)
         self.assertIn(coming_soon.id, str(caught.exception))
 
     def test_the_guard_rejects_every_sync_only_status(self) -> None:
-        coming_soon = next(e for e in self.manifest if not e.launchable)
+        manifest, coming_soon, states = self.disabled_fixture()
         for status in GameStatus:
             if not status.requires_sync:
                 continue
             with self.subTest(status=status.name):
-                rigged = dict(self.states)
+                rigged = dict(states)
                 rigged[coming_soon.id] = GameState(coming_soon.id, status, "impossible")
                 with self.assertRaises(ValueError):
-                    assert_states_are_reachable(self.manifest, rigged)
+                    assert_states_are_reachable(manifest, rigged)
 
     def test_no_shot_shows_a_banner(self) -> None:
         """The screenshots depict a healthy cabinet: no notice banner shown."""

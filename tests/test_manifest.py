@@ -45,12 +45,23 @@ class ShippedManifestTests(unittest.TestCase):
         ids = [game.id for game in manifest]
         self.assertEqual(len(ids), len(set(ids)))
 
-    def test_only_streetfighter_pacdawg_and_headscotter_are_launchable(self) -> None:
+    def test_all_eight_accepted_games_are_launchable(self) -> None:
         manifest = load_manifest(MANIFEST_FILE)
         self.assertEqual(
             [game.id for game in manifest.launchable],
-            ["streetfighter", "pacdawg", "headscotter"],
+            ["streetfighter", "pacdawg", "headscotter", "pass-the-game", "flappy-scotty",
+             "smart-ways-to-die", "spicy-adventures", "ufo-race-server"],
         )
+
+    def test_new_games_declare_their_prepared_runtime(self) -> None:
+        manifest = load_manifest(MANIFEST_FILE)
+        for game_id in ("pass-the-game", "smart-ways-to-die", "ufo-race-server"):
+            self.assertEqual(manifest.by_id(game_id).python_requirements, "requirements.txt")
+        flappy = manifest.by_id("flappy-scotty")
+        self.assertIs(flappy.runtime, Runtime.GODOT)
+        self.assertEqual(flappy.godot_version.value, "4.4.1-stable")
+        self.assertEqual(flappy.startup_script, "arcade/bootstrap.gd")
+        self.assertEqual(manifest.by_id("spicy-adventures").godot_version.value, "4.5.2-stable")
 
     def test_every_game_has_distinct_card_art(self) -> None:
         manifest = load_manifest(MANIFEST_FILE)

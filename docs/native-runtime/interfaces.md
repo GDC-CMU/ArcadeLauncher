@@ -2,10 +2,9 @@
 
 ## Activation boundary
 
-The shipped `data/games.json` remains unchanged: StreetFighter, PacDawg and
-HeadScotter are enabled; five entries remain disabled. Use a separate staged
-manifest/cache/data root to prove candidates. The coordinator alone publishes,
-promotes installed revisions and activates entries after native cabinet checks.
+The shipped `data/games.json` enables all eight accepted club games. Use a
+separate staged manifest/cache/data root to prove future candidates. Publish,
+promote installed revisions and activate entries only after native cabinet checks.
 No headless diagnostic is a claim of complete game/controller readiness.
 
 ## Public manifest schema (version 1)
